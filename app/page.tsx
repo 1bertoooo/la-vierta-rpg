@@ -1,9 +1,27 @@
+"use client";
+
 import Link from "next/link";
+import { useEffect, useState } from "react";
+import { getLastRoomCode } from "@/lib/player";
+
+const SALA_PADRAO = "velreth-elite";
 
 export default function Home() {
+  const [lastRoom, setLastRoom] = useState<string | null>(null);
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+    setLastRoom(getLastRoomCode());
+  }, []);
+
+  // Se ele já jogou em alguma sala, "Continuar" volta pra ela.
+  // Se nunca jogou, "Iniciar Aventura" abre a sala padrão da Élite.
+  const continuarHref = lastRoom ? `/sala/${lastRoom}` : `/sala/${SALA_PADRAO}`;
+  const novaHref = `/nova`;
+
   return (
     <main className="relative flex-1 overflow-hidden flex flex-col items-center justify-center px-6 pergaminho-texture">
-      {/* Brasas / partículas decorativas */}
       <div className="absolute inset-0 pointer-events-none">
         <div className="absolute top-1/4 left-1/4 w-2 h-2 rounded-full bg-[var(--color-dourado)] brasa" style={{ animationDelay: "0s" }} />
         <div className="absolute top-1/3 right-1/3 w-1.5 h-1.5 rounded-full bg-[var(--color-sangue)] brasa" style={{ animationDelay: "1s" }} />
@@ -12,7 +30,6 @@ export default function Home() {
         <div className="absolute top-2/3 left-1/3 w-1.5 h-1.5 rounded-full bg-[var(--color-dourado)] brasa" style={{ animationDelay: "0.5s" }} />
       </div>
 
-      {/* Vinheta */}
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(ellipse_at_center,_transparent_30%,_rgba(0,0,0,0.7)_100%)]" />
 
       <div className="relative z-10 text-center epico-entrada max-w-3xl">
@@ -39,12 +56,22 @@ export default function Home() {
           não-respondidas.
         </p>
 
-        <Link href="/login">
-          <button className="btn-selo">Entrar no Reino</button>
-        </Link>
+        <div className="flex flex-col sm:flex-row gap-4 items-center justify-center">
+          <Link href={continuarHref}>
+            <button className="btn-selo">
+              {mounted && lastRoom ? "Retornar à Aventura" : "Iniciar Aventura"}
+            </button>
+          </Link>
+
+          {mounted && lastRoom && (
+            <Link href={novaHref}>
+              <button className="btn-selo-secundario">Iniciar Nova Aventura</button>
+            </Link>
+          )}
+        </div>
 
         <p className="mt-12 text-xs text-[var(--color-pedra)] tracking-widest">
-          Versão 0.1 · Alpha · Apenas para a Élite
+          Versão 0.2 · Alpha · Apenas para a Élite
         </p>
       </div>
 

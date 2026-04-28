@@ -171,11 +171,22 @@ type MapToken = {
   hp_current?: number;
   hp_max?: number;
 };
+type AoEArea = {
+  id: string;
+  type: "circle" | "square";
+  cx: number; // center x in cells
+  cy: number; // center y in cells
+  radius: number; // em células
+  color?: string;
+  label?: string;
+};
 type CombatMap = {
   width: number;
   height: number;
   terrain?: string;       // 'tavern' | 'forest' | 'dungeon' | 'cave' | 'street' (etc)
   tokens: MapToken[];
+  areas?: AoEArea[];      // Sprint P — AoE templates
+  fog?: boolean[];        // Sprint P — fog of war: array linear width*height, true=revelado
 };
 
 const SCROLL_DELAY = 80;
@@ -1016,9 +1027,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               .eq("campaign_id", campaign.id);
             const validPs = (ps || []).filter((p) => (p as { user_id?: string }).user_id);
             const { data: chs } = await sb.from("characters")
-              .select("user_id, name, hp_current, hp_max, ac, des_attr")
+              .select("user_id, name, hp_current, hp_max, ac, des_attr, portrait_url")
               .eq("campaign_id", campaign.id);
-            const charMap = new Map<string, { name: string; hp_current: number; hp_max: number; ac: number; des_attr: number }>();
+            const charMap = new Map<string, { name: string; hp_current: number; hp_max: number; ac: number; des_attr: number; portrait_url?: string }>();
             for (const c of chs || []) charMap.set((c as { user_id: string }).user_id, c as never);
             // Limpa iniciativa anterior
             await sb.from("combat_initiative").delete().eq("session_id", sessionId);
@@ -1061,7 +1072,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 user_id: pp.user_id,
                 name: ch?.name || pp.display_name,
                 nick: pp.display_name,
-                portrait_url: undefined,
+                portrait_url: ch?.portrait_url || undefined,
                 x: 1 + (i % 4) * 2,
                 y: 1 + Math.floor(i / 4),
                 hp_current: ch?.hp_current,
@@ -2103,6 +2114,50 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               onRemoveToken={isAdmin ? async (tokenId: string) => {
                 if (!sessionId || !combatMap) return;
                 const novoMap = { ...combatMap, tokens: combatMap.tokens.filter((t) => t.id !== tokenId) };
+                try {
+                  await getSupabase().from("sessions").update({ combat_map: novoMap }).eq("id", sessionId);
+                } catch {}
+              } : undefined}
+              onAddArea={isAdmin ? async (area) => {
+                if (!sessionId || !combatMap) return;
+                const novoMap = { ...combatMap, areas: [...(combatMap.areas || []), area] };
+                try {
+                  await getSupabase().from("sessions").update({ combat_map: novoMap }).eq("id", sessionId);
+                } catch {}
+              } : undefined}
+              onRemoveArea={isAdmin ? async (areaId: string) => {
+                if (!sessionId || !combatMap) return;
+                const novoMap = { ...combatMap, areas: (combatMap.areas || []).filter((a) => a.id !== areaId) };
+                try {
+                  await getSupabase().from("sessions").update({ combat_map: novoMap }).eq("id", sessionId);
+                } catch {}
+              } : undefined}
+              onToggleFog={isAdmin ? async (x, y) => {
+                if (!sessionId || !combatMap) return;
+                const total = combatMap.width * combatMap.height;
+                // default: tudo revelado (true). Se fog não existe e admin clicou, criar com tudo revelado e esconder a célula clicada.
+                const fog = combatMap.fog && combatMap.fog.length === total
+                  ? [...combatMap.fog]
+                  : new Array(total).fill(true);
+                const idx = y * combatMap.width + x;
+                fog[idx] = !fog[idx];
+                const novoMap = { ...combatMap, fog };
+                try {
+                  await getSupabase().from("sessions").update({ combat_map: novoMap }).eq("id", sessionId);
+                } catch {}
+              } : undefined}
+              onClearFog={isAdmin ? async () => {
+                if (!sessionId || !combatMap) return;
+                const total = combatMap.width * combatMap.height;
+                const novoMap = { ...combatMap, fog: new Array(total).fill(true) };
+                try {
+                  await getSupabase().from("sessions").update({ combat_map: novoMap }).eq("id", sessionId);
+                } catch {}
+              } : undefined}
+              onResetFog={isAdmin ? async () => {
+                if (!sessionId || !combatMap) return;
+                const total = combatMap.width * combatMap.height;
+                const novoMap = { ...combatMap, fog: new Array(total).fill(false) };
                 try {
                   await getSupabase().from("sessions").update({ combat_map: novoMap }).eq("id", sessionId);
                 } catch {}
@@ -3530,6 +3585,11 @@ function MapaTatico({
   onMoveToken,
   onAddEnemy,
   onRemoveToken,
+  onAddArea,
+  onRemoveArea,
+  onToggleFog,
+  onClearFog,
+  onResetFog,
 }: {
   map: CombatMap;
   myUserId: string | undefined;
@@ -3537,10 +3597,18 @@ function MapaTatico({
   onMoveToken: (tokenId: string, x: number, y: number) => void | Promise<void>;
   onAddEnemy?: (name: string) => void | Promise<void>;
   onRemoveToken?: (tokenId: string) => void | Promise<void>;
+  onAddArea?: (area: AoEArea) => void | Promise<void>;
+  onRemoveArea?: (areaId: string) => void | Promise<void>;
+  onToggleFog?: (x: number, y: number) => void | Promise<void>;
+  onClearFog?: () => void | Promise<void>;
+  onResetFog?: () => void | Promise<void>;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [novoInimigo, setNovoInimigo] = useState("");
   const [hoverCell, setHoverCell] = useState<{ x: number; y: number } | null>(null);
+  // Sprint P — admin tools mode
+  const [adminTool, setAdminTool] = useState<"select" | "aoe" | "fog">("select");
+  const [aoeRadius, setAoeRadius] = useState(2);
   const cellSize = 32;
   const w = map.width;
   const h = map.height;
@@ -3578,28 +3646,86 @@ function MapaTatico({
 
   return (
     <div className="border-b border-[var(--color-pergaminho-velho)]/20 bg-[var(--color-carvao)]/40 px-3 py-2 sm:px-4">
-      <div className="flex items-baseline justify-between mb-2">
-        <p className="text-xs uppercase tracking-widest text-[var(--color-sangue)]">⚔ Mapa Tático {selectedId && <span className="text-[var(--color-pergaminho-velho)] normal-case ml-2">· clica numa célula pra mover</span>}</p>
-        {isAdmin && onAddEnemy && (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!novoInimigo.trim()) return;
-              onAddEnemy(novoInimigo.trim());
-              setNovoInimigo("");
-            }}
-            className="flex gap-1"
-          >
-            <input
-              type="text"
-              value={novoInimigo}
-              onChange={(e) => setNovoInimigo(e.target.value.slice(0, 30))}
-              placeholder="+ inimigo"
-              className="text-[10px] px-2 py-0.5 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-sangue)]/40 text-[var(--color-pergaminho)] w-24"
-            />
-            <button type="submit" className="text-[10px] uppercase tracking-widest text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)]">+</button>
-          </form>
-        )}
+      <div className="flex items-baseline justify-between mb-2 gap-2 flex-wrap">
+        <p className="text-xs uppercase tracking-widest text-[var(--color-sangue)]">
+          ⚔ Mapa Tático
+          {adminTool === "select" && selectedId && <span className="text-[var(--color-pergaminho-velho)] normal-case ml-2">· clica numa célula pra mover</span>}
+          {adminTool === "aoe" && <span className="text-[var(--color-pergaminho-velho)] normal-case ml-2">· clica pra colocar área (raio {aoeRadius})</span>}
+          {adminTool === "fog" && <span className="text-[var(--color-pergaminho-velho)] normal-case ml-2">· clica em células pra revelar/esconder</span>}
+        </p>
+        <div className="flex gap-2 flex-wrap items-center">
+          {/* Sprint P — admin tool switcher */}
+          {isAdmin && (
+            <div className="flex gap-0.5 border border-[var(--color-pergaminho-velho)]/30 rounded overflow-hidden">
+              {(["select", "aoe", "fog"] as const).map((tool) => (
+                <button
+                  key={tool}
+                  type="button"
+                  onClick={() => { setAdminTool(tool); setSelectedId(null); }}
+                  className={`text-[10px] uppercase tracking-widest px-2 py-0.5 ${
+                    adminTool === tool
+                      ? "bg-[var(--color-sangue)]/40 text-[var(--color-pergaminho)]"
+                      : "bg-[var(--color-carvao)]/80 text-[var(--color-pergaminho-velho)]/70 hover:text-[var(--color-pergaminho)]"
+                  }`}
+                  title={tool === "select" ? "Mover tokens" : tool === "aoe" ? "Adicionar áreas de efeito" : "Névoa de guerra"}
+                >
+                  {tool === "select" ? "Mover" : tool === "aoe" ? "AoE" : "Névoa"}
+                </button>
+              ))}
+            </div>
+          )}
+          {/* Sprint P — AoE radius slider */}
+          {isAdmin && adminTool === "aoe" && (
+            <label className="flex items-center gap-1 text-[10px] text-[var(--color-pergaminho-velho)]">
+              raio
+              <input
+                type="range"
+                min={1} max={6} step={1}
+                value={aoeRadius}
+                onChange={(e) => setAoeRadius(parseInt(e.target.value))}
+                className="w-16 accent-[var(--color-sangue)]"
+              />
+              <span className="text-[var(--color-dourado)] w-3">{aoeRadius}</span>
+            </label>
+          )}
+          {/* Sprint P — fog admin actions */}
+          {isAdmin && adminTool === "fog" && (
+            <div className="flex gap-1">
+              {onResetFog && (
+                <button type="button" onClick={() => onResetFog()}
+                  className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] hover:text-[var(--color-pergaminho)] px-1" title="Cobrir tudo de névoa">
+                  cobrir
+                </button>
+              )}
+              {onClearFog && (
+                <button type="button" onClick={() => onClearFog()}
+                  className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] hover:text-[var(--color-pergaminho)] px-1" title="Revelar tudo">
+                  revelar tudo
+                </button>
+              )}
+            </div>
+          )}
+          {isAdmin && onAddEnemy && adminTool === "select" && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!novoInimigo.trim()) return;
+                onAddEnemy(novoInimigo.trim());
+                setNovoInimigo("");
+              }}
+              className="flex gap-1"
+            >
+              <input
+                type="text"
+                value={novoInimigo}
+                onChange={(e) => setNovoInimigo(e.target.value.slice(0, 30))}
+                placeholder="+ inimigo"
+                className="text-[10px] px-2 py-0.5 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-sangue)]/40 text-[var(--color-pergaminho)] w-24"
+              />
+              <button type="submit" className="text-[10px] uppercase tracking-widest text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)]">+</button>
+            </form>
+          )}
+        </div>
       </div>
       <div className="overflow-auto">
         <svg
@@ -3615,12 +3741,63 @@ function MapaTatico({
             </radialGradient>
           </defs>
           <rect width={w * cellSize} height={h * cellSize} fill="url(#terrainGrad)" />
+          {/* Sprint P — AoE areas (renderizadas atrás dos tokens) */}
+          {(map.areas || []).map((a) => {
+            const ax = (a.cx + 0.5) * cellSize;
+            const ay = (a.cy + 0.5) * cellSize;
+            const aColor = a.color || "rgba(165,42,42,0.22)";
+            return (
+              <g
+                key={a.id}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (isAdmin && onRemoveArea) {
+                    if (confirm("Remover esta área?")) onRemoveArea(a.id);
+                  }
+                }}
+                style={{ cursor: isAdmin ? "context-menu" : "default" }}
+              >
+                {a.type === "circle" ? (
+                  <circle cx={ax} cy={ay} r={a.radius * cellSize}
+                    fill={aColor} stroke="#a52a2a" strokeWidth="1.5" strokeDasharray="4 3" pointerEvents="visiblePainted" />
+                ) : (
+                  <rect
+                    x={(a.cx - a.radius) * cellSize + cellSize / 2}
+                    y={(a.cy - a.radius) * cellSize + cellSize / 2}
+                    width={a.radius * 2 * cellSize}
+                    height={a.radius * 2 * cellSize}
+                    fill={aColor} stroke="#a52a2a" strokeWidth="1.5" strokeDasharray="4 3" pointerEvents="visiblePainted"
+                  />
+                )}
+                {a.label && (
+                  <text x={ax} y={ay} textAnchor="middle" fill="#ffd700" fontSize="10"
+                    fontFamily="var(--font-cinzel)" pointerEvents="none">
+                    {a.label}
+                  </text>
+                )}
+              </g>
+            );
+          })}
           {/* Grid */}
           {Array.from({ length: w }).map((_, x) =>
             Array.from({ length: h }).map((_, y) => {
               // Sprint O — measure: highlight cells dentro do alcance do token selecionado (5 casas = 9m em 5e-style)
               const sel = selectedId ? map.tokens.find((t) => t.id === selectedId) : null;
               const inRange = sel ? Math.max(Math.abs(sel.x - x), Math.abs(sel.y - y)) <= 6 : false;
+              // Sprint P — preview do AoE no hover
+              const isAoePreview = adminTool === "aoe" && hoverCell &&
+                Math.max(Math.abs(hoverCell.x - x), Math.abs(hoverCell.y - y)) <= aoeRadius;
+              const fillColor = isAoePreview
+                ? "rgba(165,42,42,0.20)"
+                : inRange
+                  ? "rgba(201,169,97,0.06)"
+                  : "transparent";
+              const cursorMode =
+                adminTool === "aoe" || adminTool === "fog"
+                  ? "pointer"
+                  : selectedId
+                    ? "pointer"
+                    : "default";
               return (
                 <rect
                   key={`${x}-${y}`}
@@ -3628,9 +3805,26 @@ function MapaTatico({
                   y={y * cellSize}
                   width={cellSize}
                   height={cellSize}
-                  fill={inRange ? "rgba(201,169,97,0.06)" : "transparent"}
+                  fill={fillColor}
                   stroke="rgba(212,165,116,0.15)"
                   onClick={() => {
+                    // Sprint P — admin AoE mode: clica adiciona área
+                    if (isAdmin && adminTool === "aoe" && onAddArea) {
+                      onAddArea({
+                        id: `aoe-${Date.now().toString(36)}`,
+                        type: "circle",
+                        cx: x,
+                        cy: y,
+                        radius: aoeRadius,
+                      });
+                      return;
+                    }
+                    // Sprint P — admin Fog mode: clica toggle fog cell
+                    if (isAdmin && adminTool === "fog" && onToggleFog) {
+                      onToggleFog(x, y);
+                      return;
+                    }
+                    // Modo padrão: mover token selecionado
                     if (!selectedId) return;
                     const t = map.tokens.find((tk) => tk.id === selectedId);
                     if (!t || !podeMover(t)) return;
@@ -3638,9 +3832,13 @@ function MapaTatico({
                     setSelectedId(null);
                     setHoverCell(null);
                   }}
-                  onMouseEnter={() => selectedId && setHoverCell({ x, y })}
+                  onMouseEnter={() => {
+                    if (selectedId || adminTool === "aoe" || adminTool === "fog") {
+                      setHoverCell({ x, y });
+                    }
+                  }}
                   onMouseLeave={() => setHoverCell(null)}
-                  style={{ cursor: selectedId ? "pointer" : "default" }}
+                  style={{ cursor: cursorMode }}
                 />
               );
             })
@@ -3691,23 +3889,49 @@ function MapaTatico({
                 }}
                 style={{ cursor: podeInteragir ? "pointer" : "default" }}
               >
-                <circle
-                  cx={cx} cy={cy} r={r}
-                  fill={corToken(t)}
-                  stroke={ehSelecionado ? "#ffd700" : "rgba(244,232,200,0.5)"}
-                  strokeWidth={ehSelecionado ? 3 : 1.5}
-                />
-                <text
-                  x={cx} y={cy + fontSize / 3}
-                  textAnchor="middle"
-                  fill="#1a1612"
-                  fontSize={fontSize}
-                  fontWeight="bold"
-                  fontFamily="var(--font-cinzel)"
-                  pointerEvents="none"
-                >
-                  {(t.nick || t.name).slice(0, 2).toUpperCase()}
-                </text>
+                {/* Sprint P — portrait clipped em círculo */}
+                {t.portrait_url ? (
+                  <>
+                    <defs>
+                      <clipPath id={`tokenClip-${t.id}`}>
+                        <circle cx={cx} cy={cy} r={r} />
+                      </clipPath>
+                    </defs>
+                    <image
+                      href={t.portrait_url}
+                      x={cx - r} y={cy - r}
+                      width={r * 2} height={r * 2}
+                      preserveAspectRatio="xMidYMid slice"
+                      clipPath={`url(#tokenClip-${t.id})`}
+                    />
+                    <circle
+                      cx={cx} cy={cy} r={r}
+                      fill="none"
+                      stroke={ehSelecionado ? "#ffd700" : corToken(t)}
+                      strokeWidth={ehSelecionado ? 3 : 2}
+                    />
+                  </>
+                ) : (
+                  <>
+                    <circle
+                      cx={cx} cy={cy} r={r}
+                      fill={corToken(t)}
+                      stroke={ehSelecionado ? "#ffd700" : "rgba(244,232,200,0.5)"}
+                      strokeWidth={ehSelecionado ? 3 : 1.5}
+                    />
+                    <text
+                      x={cx} y={cy + fontSize / 3}
+                      textAnchor="middle"
+                      fill="#1a1612"
+                      fontSize={fontSize}
+                      fontWeight="bold"
+                      fontFamily="var(--font-cinzel)"
+                      pointerEvents="none"
+                    >
+                      {(t.nick || t.name).slice(0, 2).toUpperCase()}
+                    </text>
+                  </>
+                )}
                 {/* HP bar pequena */}
                 {typeof t.hp_current === "number" && typeof t.hp_max === "number" && t.hp_max > 0 && (
                   <>
@@ -3724,10 +3948,39 @@ function MapaTatico({
               </g>
             );
           })}
+          {/* Sprint P — Fog of war overlay (renderiza por cima dos tokens) */}
+          {map.fog && map.fog.length === w * h && (
+            <g pointerEvents="none">
+              {Array.from({ length: w }).map((_, x) =>
+                Array.from({ length: h }).map((_, y) => {
+                  const idx = y * w + x;
+                  const revelado = map.fog![idx];
+                  if (revelado) return null;
+                  return (
+                    <rect
+                      key={`fog-${x}-${y}`}
+                      x={x * cellSize}
+                      y={y * cellSize}
+                      width={cellSize}
+                      height={cellSize}
+                      fill="#0a0808"
+                      opacity={isAdmin ? 0.55 : 0.95}
+                    />
+                  );
+                })
+              )}
+            </g>
+          )}
         </svg>
       </div>
       <p className="text-[10px] text-[var(--color-pergaminho-velho)] mt-1 italic text-center">
-        {isAdmin ? "Clica num token, depois numa célula pra mover. Right-click remove inimigos." : "Clica no teu token e depois numa célula pra mover."}
+        {adminTool === "aoe"
+          ? "Clica numa célula pra colocar área (ataque em área, conjuração). Right-click remove."
+          : adminTool === "fog"
+            ? "Clica em células pra cobrir/revelar. Players só veem onde foi revelado."
+            : isAdmin
+              ? "Clica num token, depois numa célula pra mover. Right-click remove inimigos."
+              : "Clica no teu token e depois numa célula pra mover."}
       </p>
     </div>
   );

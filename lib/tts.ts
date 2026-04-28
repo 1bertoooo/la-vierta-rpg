@@ -78,10 +78,35 @@ export function ttsStop() {
   chunks = [];
   speakingChunkIdx = 0;
 
-  // Para Web Speech API tb (fallback)
   if (typeof window !== "undefined" && window.speechSynthesis) {
     window.speechSynthesis.cancel();
   }
+}
+
+export function ttsPause() {
+  if (audioEl && !audioEl.paused) {
+    audioEl.pause();
+  }
+  if (typeof window !== "undefined" && window.speechSynthesis) {
+    window.speechSynthesis.pause();
+  }
+}
+
+export function ttsResume() {
+  if (audioEl && audioEl.paused) {
+    audioEl.play().catch(() => {});
+  }
+  if (typeof window !== "undefined" && window.speechSynthesis) {
+    window.speechSynthesis.resume();
+  }
+}
+
+export function ttsIsPaused(): boolean {
+  if (audioEl) return audioEl.paused && audioEl.currentTime > 0 && !audioEl.ended;
+  if (typeof window !== "undefined" && window.speechSynthesis) {
+    return window.speechSynthesis.paused;
+  }
+  return false;
 }
 
 /**

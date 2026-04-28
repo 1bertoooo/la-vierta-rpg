@@ -6,7 +6,7 @@ import Link from "next/link";
 import { getSupabase, type Profile } from "@/lib/supabase/client";
 import { setLastRoomCode } from "@/lib/player";
 import { rolarDados, DADOS_PADRAO } from "@/lib/dados";
-import { ttsSpeak, ttsStop, ttsIsEnabled, ttsSetEnabled } from "@/lib/tts";
+import { ttsSpeak, ttsStop, ttsIsEnabled, ttsSetEnabled, ttsPause, ttsResume, ttsIsPaused } from "@/lib/tts";
 import { CLASSES, RACAS, modAtributo } from "@/lib/lvs";
 import { DM_OPENING_PROMPT } from "@/lib/dm-prompt";
 import {
@@ -18,6 +18,7 @@ import {
   audioSetVolume,
   audioGetVolume,
   audioResumeIfBlocked,
+  audioIsPlaying,
   type Mood,
 } from "@/lib/audio";
 
@@ -109,6 +110,13 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [resetConfirm, setResetConfirm] = useState("");
+
+  // Visualizar ficha de outro player
+  const [fichaVendo, setFichaVendo] = useState<string | null>(null); // user_id sendo visualizado
+  // TTS pause state
+  const [ttsPaused, setTtsPaused] = useState(false);
+  // Música tocando
+  const [musicaTocando, setMusicaTocando] = useState(false);
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -511,8 +519,24 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     const novo = !audioMuted;
     setAudioMuted(novo);
     audioSetMuted(novo);
-    if (novo) audioStop();
-    else audioPlayMood("tavern");
+    if (novo) {
+      audioStop();
+      setMusicaTocando(false);
+    } else {
+      // Importante: chamar audioPlayMood SÍNCRONO dentro do click handler
+      audioPlayMood("tavern");
+      setTimeout(() => setMusicaTocando(audioIsPlaying()), 500);
+    }
+  }
+
+  function toggleTtsPause() {
+    if (ttsIsPaused()) {
+      ttsResume();
+      setTtsPaused(false);
+    } else {
+      ttsPause();
+      setTtsPaused(true);
+    }
   }
 
   function setVolume(v: number) {
@@ -593,18 +617,32 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             className={`text-xs uppercase tracking-widest transition ${ttsOn ? "text-[var(--color-dourado)]" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>
             {ttsOn ? "🔊" : "🔇"}
           </button>
+          <button onClick={toggleTtsPause} title={ttsPaused ? "Continuar narração" : "Pausar narração"}
+            className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
+            {ttsPaused ? "▶" : "⏸"}
+          </button>
           <button onClick={replayUltimaNarracao} title="Repetir última narração"
             className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">↻</button>
           <div className="relative">
             <button onClick={() => setShowAudioPanel((s) => !s)} title="Música"
-              className={`text-xs uppercase tracking-widest transition ${!audioMuted ? "text-[var(--color-dourado)]" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>♪</button>
+              className={`text-xs uppercase tracking-widest transition ${musicaTocando ? "text-[var(--color-dourado)] animate-pulse" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>
+              {musicaTocando ? "♪" : "♫"}
+            </button>
             {showAudioPanel && (
-              <div className="absolute right-0 top-full mt-2 w-56 bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/40 rounded-lg p-3 z-30">
-                <button onClick={toggleAudio} className="w-full text-left text-xs text-[var(--color-pergaminho)] mb-3 hover:text-[var(--color-dourado)]">
-                  {audioMuted ? "▶ Tocar música" : "⏸ Silenciar"}
+              <div className="absolute right-0 top-full mt-2 w-64 bg-[var(--color-carvao)] border border-[var(--color-dourado)]/60 rounded-lg p-4 z-30 shadow-xl">
+                <button
+                  onClick={toggleAudio}
+                  className={`w-full px-3 py-2 rounded text-xs uppercase tracking-widest mb-3 transition ${
+                    musicaTocando
+                      ? "bg-[var(--color-vinho)]/40 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)]"
+                      : "bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)]"
+                  }`}
+                >
+                  {audioMuted ? "▶ Tocar música" : musicaTocando ? "⏸ Silenciar" : "▶ Retomar (autoplay bloqueado — clica)"}
                 </button>
+                <label className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] block mb-1">Volume</label>
                 <input type="range" min="0" max="1" step="0.05" value={audioVol} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-full" />
-                <p className="text-[10px] text-[var(--color-pedra)] mt-2">A trilha muda conforme a cena.</p>
+                <p className="text-[10px] text-[var(--color-pedra)] mt-3 italic">A trilha muda conforme a cena.</p>
               </div>
             )}
           </div>
@@ -626,33 +664,40 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               const isMe = p.user_id === me?.id;
               const ehTurnoDele = currentTurnUserId === p.user_id;
               return (
-                <li key={p.id} className={`flex items-center gap-2 px-2 py-1.5 rounded transition ${
-                  isMe ? "bg-[var(--color-vinho)]/20 border border-[var(--color-dourado)]/30" : ""
-                } ${ehTurnoDele ? "ring-2 ring-[var(--color-dourado)]/60" : ""}`}>
-                  {ch?.portrait_url ? (
-                    /* eslint-disable-next-line @next/next/no-img-element */
-                    <img src={ch.portrait_url} alt={ch.name} className="w-8 h-8 rounded-full object-cover border border-[var(--color-dourado)]/40" />
-                  ) : (
-                    <span className="w-8 h-8 rounded-full bg-[var(--color-pedra)]/40 flex items-center justify-center text-xs text-[var(--color-pergaminho-velho)]">
-                      {(ch?.name || p.display_name).slice(0, 1).toUpperCase()}
-                    </span>
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <div className="text-sm text-[var(--color-pergaminho)] truncate flex items-center gap-1">
-                      {ch?.name || p.display_name}
-                      {ehTurnoDele && <span className="text-[var(--color-dourado)] text-[10px]">▸</span>}
-                    </div>
-                    {ch && (
-                      <div className="text-[10px] text-[var(--color-pergaminho-velho)] uppercase tracking-wider">
-                        {RACAS.find((r) => r.key === ch.race)?.nome.split(" ")[0]} · {CLASSES.find((c) => c.key === ch.class)?.nome}
-                      </div>
+                <li key={p.id}>
+                  <button
+                    onClick={() => p.user_id && ch && setFichaVendo(p.user_id)}
+                    disabled={!ch}
+                    className={`w-full flex items-center gap-2 px-2 py-1.5 rounded transition text-left ${
+                      isMe ? "bg-[var(--color-vinho)]/20 border border-[var(--color-dourado)]/30" : "border border-transparent hover:border-[var(--color-pergaminho-velho)]/30"
+                    } ${ehTurnoDele ? "ring-2 ring-[var(--color-dourado)]/60" : ""} ${ch ? "cursor-pointer" : "cursor-default"}`}
+                  >
+                    {ch?.portrait_url ? (
+                      /* eslint-disable-next-line @next/next/no-img-element */
+                      <img src={ch.portrait_url} alt={ch.name} className="w-8 h-8 rounded-full object-cover border border-[var(--color-dourado)]/40" />
+                    ) : (
+                      <span className="w-8 h-8 rounded-full bg-[var(--color-pedra)]/40 flex items-center justify-center text-xs text-[var(--color-pergaminho-velho)]">
+                        {(ch?.name || p.display_name).slice(0, 1).toUpperCase()}
+                      </span>
                     )}
-                  </div>
-                  {ch && <div className="text-[10px] text-[var(--color-sangue)]">{ch.hp_current}/{ch.hp_max}</div>}
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm text-[var(--color-pergaminho)] truncate flex items-center gap-1">
+                        {ch?.name || p.display_name}
+                        {ehTurnoDele && <span className="text-[var(--color-dourado)] text-[10px]">▸</span>}
+                      </div>
+                      {ch && (
+                        <div className="text-[10px] text-[var(--color-pergaminho-velho)] uppercase tracking-wider">
+                          {RACAS.find((r) => r.key === ch.race)?.nome.split(" ")[0]} · {CLASSES.find((c) => c.key === ch.class)?.nome}
+                        </div>
+                      )}
+                    </div>
+                    {ch && <div className="text-[10px] text-[var(--color-sangue)]">{ch.hp_current}/{ch.hp_max}</div>}
+                  </button>
                 </li>
               );
             })}
           </ul>
+          <p className="text-[10px] text-[var(--color-pedra)] mt-2 italic">Clica num para ver ficha</p>
 
           {isAdmin && (
             <div className="mt-6 pt-4 border-t border-[var(--color-pergaminho-velho)]/20 space-y-2">
@@ -757,6 +802,19 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         </div>
       )}
 
+      {/* Modal ficha de outro player */}
+      {fichaVendo && characters[fichaVendo] && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-6" onClick={() => setFichaVendo(null)}>
+          <div onClick={(e) => e.stopPropagation()} className="bg-[var(--color-carvao)] border border-[var(--color-dourado)] rounded-lg p-6 max-w-md w-full max-h-[85vh] overflow-y-auto">
+            <div className="flex items-baseline justify-between mb-4">
+              <h2 className="text-xl text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">Ficha</h2>
+              <button onClick={() => setFichaVendo(null)} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xl leading-none">×</button>
+            </div>
+            <Ficha char={characters[fichaVendo]} compact={fichaVendo !== me?.id} onUsarItem={fichaVendo === me?.id ? usarItem : undefined} />
+          </div>
+        </div>
+      )}
+
       {/* Modal reset */}
       {showResetModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-6">
@@ -828,20 +886,24 @@ function LogEntry({ ev, myUserId, onReplay }: { ev: LogEvent; myUserId: string |
   return null;
 }
 
-function Ficha({ char, onUsarItem }: { char: Character; onUsarItem: (item: InventoryItem) => void }) {
+function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (item: InventoryItem) => void; compact?: boolean }) {
   const raca = RACAS.find((r) => r.key === char.race);
   const classe = CLASSES.find((c) => c.key === char.class);
+  const portraitSize = compact ? "w-20 h-20" : "w-32 h-32";
   return (
     <div className="space-y-4">
-      {char.portrait_url && (
-        /* eslint-disable-next-line @next/next/no-img-element */
-        <img src={char.portrait_url} alt={char.name} className="w-full aspect-square object-cover rounded-lg border border-[var(--color-dourado)]/40" />
-      )}
-      <div>
-        <h3 className="text-xl text-[var(--color-dourado-claro)] dourado-glow font-[family-name:var(--font-cinzel)]">{char.name}</h3>
-        <p className="text-xs text-[var(--color-pergaminho-velho)] uppercase tracking-widest">
-          {raca?.nome} · {classe?.nome} · Nível {char.level}
-        </p>
+      <div className="flex items-start gap-3">
+        {char.portrait_url && (
+          /* eslint-disable-next-line @next/next/no-img-element */
+          <img src={char.portrait_url} alt={char.name} className={`${portraitSize} object-cover rounded-lg border border-[var(--color-dourado)]/40 flex-shrink-0`} />
+        )}
+        <div className="flex-1 min-w-0">
+          <h3 className="text-lg text-[var(--color-dourado-claro)] dourado-glow font-[family-name:var(--font-cinzel)] leading-tight">{char.name}</h3>
+          <p className="text-xs text-[var(--color-pergaminho-velho)] uppercase tracking-widest mt-1">
+            {raca?.nome} · {classe?.nome}
+          </p>
+          <p className="text-xs text-[var(--color-pergaminho-velho)]">Nível {char.level}</p>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-2 text-center">
@@ -869,7 +931,7 @@ function Ficha({ char, onUsarItem }: { char: Character; onUsarItem: (item: Inven
         })}
       </div>
 
-      {char.inventory && char.inventory.length > 0 && (
+      {!compact && char.inventory && char.inventory.length > 0 && (
         <div>
           <h4 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">Inventário</h4>
           <ul className="space-y-1">
@@ -879,7 +941,7 @@ function Ficha({ char, onUsarItem }: { char: Character; onUsarItem: (item: Inven
                   <div className="text-[var(--color-dourado)]">{item.nome}</div>
                   {item.desc && <div className="text-[10px] text-[var(--color-pergaminho-velho)] italic">{item.desc}</div>}
                 </div>
-                {item.consumivel && (
+                {item.consumivel && onUsarItem && (
                   <button onClick={() => onUsarItem(item)} className="text-[10px] uppercase tracking-widest text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)] px-2 py-0.5 border border-[var(--color-sangue)]/40 rounded">
                     Usar
                   </button>
@@ -916,7 +978,7 @@ function Ficha({ char, onUsarItem }: { char: Character; onUsarItem: (item: Inven
         </div>
       )}
 
-      {char.background && (
+      {!compact && char.background && (
         <div>
           <h4 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">História</h4>
           <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>

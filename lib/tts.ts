@@ -169,6 +169,7 @@ async function fetchAudio(text: string, voice: OpenAIVoice, speed: number): Prom
     const data = await r.json();
     if (data.url) {
       audioCache.set(cacheKey, data.url);
+      pruneCache();
       return data.url;
     }
     throw new Error(data.error || "sem url");
@@ -176,36 +177,57 @@ async function fetchAudio(text: string, voice: OpenAIVoice, speed: number): Prom
   const blob = await r.blob();
   const url = URL.createObjectURL(blob);
   audioCache.set(cacheKey, url);
+  pruneCache();
   return url;
 }
+
+// Guard contra recursão infinita em caso de falha em loop (B13)
+let consecutiveErrors = 0;
 
 async function tocarChunkAtual() {
   if (stopped) return;
   if (speakingChunkIdx >= chunks.length) return;
+  if (consecutiveErrors > 5) {
+    // Aborta — algo tá quebrado em loop
+    consecutiveErrors = 0;
+    return;
+  }
 
   const chunk = chunks[speakingChunkIdx];
+
+  // Pré-busca o PRÓXIMO chunk em paralelo (enquanto este toca)
+  const proxIdx = speakingChunkIdx + 1;
+  if (proxIdx < chunks.length) {
+    const prox = chunks[proxIdx];
+    fetchAudio(prox.text, prox.voice, prox.speed).catch(() => null);
+  }
+
   try {
     const url = await fetchAudio(chunk.text, chunk.voice, chunk.speed);
     if (stopped) return;
     audioEl = new Audio(url);
     audioEl.onended = () => {
+      consecutiveErrors = 0;
       speakingChunkIdx++;
       tocarChunkAtual();
     };
     audioEl.onerror = () => {
+      consecutiveErrors++;
       speakingChunkIdx++;
       tocarChunkAtual();
     };
     await audioEl.play();
+    consecutiveErrors = 0;
   } catch {
     if (typeof window !== "undefined" && window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(chunk.text);
       u.lang = "pt-BR";
       u.rate = chunk.speed;
       u.onend = () => { speakingChunkIdx++; tocarChunkAtual(); };
-      u.onerror = () => { speakingChunkIdx++; tocarChunkAtual(); };
+      u.onerror = () => { consecutiveErrors++; speakingChunkIdx++; tocarChunkAtual(); };
       window.speechSynthesis.speak(u);
     } else {
+      consecutiveErrors++;
       speakingChunkIdx++;
       tocarChunkAtual();
     }
@@ -214,7 +236,30 @@ async function tocarChunkAtual() {
 
 async function preloadChunks(text: string) {
   const cs = dividirEmChunks(text);
-  await Promise.all(cs.map((c) => fetchAudio(c.text, c.voice, c.speed).catch(() => null)));
+  // Streaming: só pré-carrega o PRIMEIRO chunk (latência inicial mínima).
+  // Os subsequentes carregam em background enquanto o anterior toca (no tocarChunkAtual).
+  if (cs.length === 0) return;
+  await fetchAudio(cs[0].text, cs[0].voice, cs[0].speed).catch(() => null);
+  if (cs.length > 1) {
+    // Background prefetch do segundo (não bloqueia)
+    fetchAudio(cs[1].text, cs[1].voice, cs[1].speed).catch(() => null);
+  }
+}
+
+// LRU simples pra audioCache (B14): limita 100 entradas e revoga URLs antigos
+const MAX_CACHE = 100;
+function pruneCache() {
+  if (audioCache.size <= MAX_CACHE) return;
+  const excess = audioCache.size - MAX_CACHE;
+  let i = 0;
+  for (const [k, url] of audioCache) {
+    if (i >= excess) break;
+    if (url.startsWith("blob:")) {
+      try { URL.revokeObjectURL(url); } catch {}
+    }
+    audioCache.delete(k);
+    i++;
+  }
 }
 
 export function ttsSpeak(text: string, opts?: { force?: boolean; playAt?: number }) {

@@ -232,6 +232,37 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     };
   }, []);
 
+  // Heartbeat: pinga last_seen_at a cada 30s pra outros saberem que tô online
+  useEffect(() => {
+    if (!me?.id || !campaign?.id) return;
+    const sb = getSupabase();
+    const ping = async () => {
+      try {
+        await sb.from("players")
+          .update({ last_seen_at: new Date().toISOString() })
+          .eq("campaign_id", campaign.id)
+          .eq("user_id", me.id);
+      } catch {}
+    };
+    ping(); // imediato
+    const interval = setInterval(ping, 30000);
+    return () => clearInterval(interval);
+  }, [me?.id, campaign?.id]);
+
+  // Esc fecha modais abertos
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      if (showDados) setShowDados(false);
+      else if (showPergaminhos) setShowPergaminhos(false);
+      else if (fichaVendo) setFichaVendo(null);
+      else if (showAudioPanel) setShowAudioPanel(false);
+      else if (showResetModal) setShowResetModal(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [showDados, showPergaminhos, fichaVendo, showAudioPanel, showResetModal]);
+
   // "Tua vez" — toca som + vibration + toast quando turno fica meu
   const turnoAnteriorRef = useRef<string | null>(null);
   useEffect(() => {
@@ -980,14 +1011,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   return (
     <main className="min-h-screen pergaminho-texture flex flex-col">
-      <header className="border-b border-[var(--color-pergaminho-velho)]/20 px-4 py-3 flex items-center justify-between gap-3">
-        <Link href="/" className="text-xs uppercase tracking-[0.3em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">← La Vierta</Link>
-        <div className="flex-1 text-center">
-          <span className="text-xs uppercase tracking-widest text-[var(--color-pedra)]">
+      <header className="border-b border-[var(--color-pergaminho-velho)]/20 px-3 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2 sm:gap-3 flex-wrap">
+        <Link href="/" className="text-[10px] sm:text-xs uppercase tracking-[0.2em] sm:tracking-[0.3em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">← <span className="hidden sm:inline">La Vierta</span></Link>
+        <div className="flex-1 text-center min-w-0 hidden sm:block">
+          <span className="text-xs uppercase tracking-widest text-[var(--color-pedra)] truncate block">
             {campaign?.name} · Cap. {campaign?.current_chapter}
           </span>
         </div>
-        <div className="flex items-center gap-3 text-sm">
+        <div className="flex items-center gap-2 sm:gap-3 text-sm">
           <button onClick={toggleTTS} title="Voz do mestre"
             className={`text-xs uppercase tracking-widest transition ${ttsOn ? "text-[var(--color-dourado)]" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>
             {ttsOn ? "🔊" : "🔇"}
@@ -1049,6 +1080,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               const ch = characters[p.user_id || ""];
               const isMe = p.user_id === me?.id;
               const ehTurnoDele = currentTurnUserId === p.user_id;
+              // Online se atualizou last_seen_at nos últimos 60s
+              const lastSeen = p.last_seen_at ? new Date(p.last_seen_at).getTime() : 0;
+              const online = Date.now() - lastSeen < 60000;
               return (
                 <li key={p.id}>
                   <button
@@ -1058,14 +1092,20 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                       isMe ? "bg-[var(--color-vinho)]/20 border border-[var(--color-dourado)]/30" : "border border-transparent hover:border-[var(--color-pergaminho-velho)]/30"
                     } ${ehTurnoDele ? "ring-2 ring-[var(--color-dourado)]/60" : ""} ${ch ? "cursor-pointer" : "cursor-default"}`}
                   >
-                    {ch?.portrait_url ? (
-                      /* eslint-disable-next-line @next/next/no-img-element */
-                      <img src={ch.portrait_url} alt={ch.name} className="w-8 h-8 rounded-full object-cover border border-[var(--color-dourado)]/40" />
-                    ) : (
-                      <span className="w-8 h-8 rounded-full bg-[var(--color-pedra)]/40 flex items-center justify-center text-xs text-[var(--color-pergaminho-velho)]">
-                        {(ch?.name || p.display_name).slice(0, 1).toUpperCase()}
-                      </span>
-                    )}
+                    <div className="relative flex-shrink-0">
+                      {ch?.portrait_url ? (
+                        /* eslint-disable-next-line @next/next/no-img-element */
+                        <img src={ch.portrait_url} alt={ch.name} className={`w-8 h-8 rounded-full object-cover border border-[var(--color-dourado)]/40 ${!online ? "grayscale opacity-60" : ""}`} loading="lazy" />
+                      ) : (
+                        <span className="w-8 h-8 rounded-full bg-[var(--color-pedra)]/40 flex items-center justify-center text-xs text-[var(--color-pergaminho-velho)]">
+                          {(ch?.name || p.display_name).slice(0, 1).toUpperCase()}
+                        </span>
+                      )}
+                      <span
+                        className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-[var(--color-carvao)] ${online ? "bg-emerald-500" : "bg-[var(--color-pedra)]"}`}
+                        title={online ? "Online" : "Offline"}
+                      />
+                    </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-sm text-[var(--color-pergaminho)] truncate flex items-center gap-1">
                         {ch?.name || p.display_name}

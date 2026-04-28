@@ -59,8 +59,8 @@ export default function CriacaoPage({
   const [gerandoHistoria, setGerandoHistoria] = useState(false);
 
   const [retratoEscolhido, setRetratoEscolhido] = useState<string | null>(null);
-  const [retratoUrls, setRetratoUrls] = useState<(string | null)[]>([null, null, null, null]);
-  const [retratoEstados, setRetratoEstados] = useState<("pendente" | "carregando" | "ok" | "erro")[]>(["pendente", "pendente", "pendente", "pendente"]);
+  const [retratoUrls, setRetratoUrls] = useState<(string | null)[]>([null, null]);
+  const [retratoEstados, setRetratoEstados] = useState<("pendente" | "carregando" | "ok" | "erro")[]>(["pendente", "pendente"]);
 
   const [erro, setErro] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -181,11 +181,10 @@ export default function CriacaoPage({
 
   async function regerarRetratos() {
     setRetratoEscolhido(null);
-    setRetratoUrls([null, null, null, null]);
-    setRetratoEstados(["pendente", "pendente", "pendente", "pendente"]);
-    // Sequencial: 1 por vez. ~15s cada → ~60s total.
-    // Paralelo gerava timeout no Vercel Hobby (concorrência limitada).
-    for (let i = 0; i < 4; i++) {
+    setRetratoUrls([null, null]);
+    setRetratoEstados(["pendente", "pendente"]);
+    // Sequencial: 1 por vez. ~15s cada → ~30s total pra 2.
+    for (let i = 0; i < 2; i++) {
       await gerarRetratoSlot(i);
     }
   }
@@ -597,8 +596,8 @@ export default function CriacaoPage({
               4 retratos forjados pela IA. Escolhe um — ou re-roll por novos.
             </p>
 
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-              {[0, 1, 2, 3].map((idx) => {
+            <div className="grid grid-cols-2 gap-4 mb-6 max-w-2xl mx-auto">
+              {[0, 1].map((idx) => {
                 const estado = retratoEstados[idx];
                 const url = retratoUrls[idx];
                 const escolhido = !!url && retratoEscolhido === url;
@@ -658,7 +657,7 @@ export default function CriacaoPage({
 
             <div className="mb-8">
               <p className="text-xs text-[var(--color-pedra)] italic">
-                ✦ GPT-image-1 · ~10s por retrato · usa tua descrição da aparência (privada). Escolhe o que mais te representa — uma vez salvo, fica.
+                ✦ GPT-image-1 · ~30s pros 2 retratos · usa tua descrição da aparência (privada). Escolhe um — uma vez salvo, fica.
               </p>
             </div>
 

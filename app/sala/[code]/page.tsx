@@ -156,6 +156,27 @@ type PendingRollServer = {
   expires_at?: number;
 };
 
+// Sprint N — Mapa tático
+type MapToken = {
+  id: string;
+  type: "player" | "enemy" | "npc";
+  user_id?: string;       // se player, dono do token
+  name: string;
+  nick?: string;
+  portrait_url?: string;
+  x: number;              // 0..(width-1)
+  y: number;              // 0..(height-1)
+  color?: string;         // override visual
+  hp_current?: number;
+  hp_max?: number;
+};
+type CombatMap = {
+  width: number;
+  height: number;
+  terrain?: string;       // 'tavern' | 'forest' | 'dungeon' | 'cave' | 'street' (etc)
+  tokens: MapToken[];
+};
+
 const SCROLL_DELAY = 80;
 
 export default function SalaPage({ params }: { params: Promise<{ code: string }> }) {
@@ -240,6 +261,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [roundNumber, setRoundNumber] = useState<number>(0);
   const [roundPhase, setRoundPhase] = useState<RoundPhase>("idle");
   const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
+  // Sprint N — mapa tático
+  const [combatMap, setCombatMap] = useState<CombatMap | null>(null);
 
   // isAdmin precisa ser declarado cedo pois é usado em vários useEffects acima do early return
   const isAdmin = me?.role === "admin";
@@ -568,9 +591,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             const { data: events } = await sb.from("combat_log").select("*").eq("session_id", sId as string).order("created_at", { ascending: true }).limit(200);
             if (!cancelled) setLog((events as LogEvent[]) || []);
 
-            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather, doom_clocks, summary, summary_event_count, round_number, round_phase, pending_actions, pending_roll").eq("id", sId).maybeSingle();
+            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather, doom_clocks, summary, summary_event_count, round_number, round_phase, pending_actions, pending_roll, combat_map").eq("id", sId).maybeSingle();
             if (!cancelled && sess) {
-              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number; round_number?: number; round_phase?: RoundPhase; pending_actions?: PendingAction[]; pending_roll?: PendingRollServer | null };
+              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number; round_number?: number; round_phase?: RoundPhase; pending_actions?: PendingAction[]; pending_roll?: PendingRollServer | null; combat_map?: CombatMap | null };
+              if (s.combat_map !== undefined) setCombatMap(s.combat_map);
               setCurrentTurnUserId(s.current_turn_player_id);
               setEmCombate(!!s.in_combat);
               if (s.time_of_day) setTimeOfDay(s.time_of_day);
@@ -744,7 +768,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           ).on(
             "postgres_changes", { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sId}` },
             (payload) => {
-              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number; round_number?: number; round_phase?: RoundPhase; pending_actions?: PendingAction[]; pending_roll?: PendingRollServer | null };
+              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number; round_number?: number; round_phase?: RoundPhase; pending_actions?: PendingAction[]; pending_roll?: PendingRollServer | null; combat_map?: CombatMap | null };
+              if (sess.combat_map !== undefined) setCombatMap(sess.combat_map);
               setCurrentTurnUserId(sess.current_turn_player_id);
               if (typeof sess.in_combat === "boolean") setEmCombate(sess.in_combat);
               if (sess.time_of_day) setTimeOfDay(sess.time_of_day);
@@ -1017,6 +1042,25 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             await sb.from("sessions").update({ in_combat: true }).eq("id", sessionId);
             // Bug 4 fix — limpa buffer de rodada quando combate começa
             try { await sb.rpc("complete_round", { p_session_id: sessionId }); } catch {}
+            // Sprint N — popula mapa tático com tokens dos players (e nada inimigo ainda — DM/admin adiciona)
+            const tokens: MapToken[] = validPs.map((p, i) => {
+              const pp = p as { user_id: string; display_name: string };
+              const ch = charMap.get(pp.user_id);
+              return {
+                id: `pl-${pp.user_id}`,
+                type: "player",
+                user_id: pp.user_id,
+                name: ch?.name || pp.display_name,
+                nick: pp.display_name,
+                portrait_url: undefined,
+                x: 1 + (i % 4) * 2,
+                y: 1 + Math.floor(i / 4),
+                hp_current: ch?.hp_current,
+                hp_max: ch?.hp_max,
+              };
+            });
+            const mapaInicial: CombatMap = { width: 16, height: 12, terrain: "tavern", tokens };
+            await sb.from("sessions").update({ combat_map: mapaInicial }).eq("id", sessionId);
           }, Math.max(0, delayMs));
           break;
         }
@@ -2007,6 +2051,48 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           {/* Tracker de iniciativa — só aparece em combate */}
           {emCombate && iniciativa.length > 0 && (
             <IniciativaTracker iniciativa={iniciativa} myUserId={me?.id} isAdmin={isAdmin} />
+          )}
+          {/* Sprint N — Mapa tático em combate */}
+          {emCombate && combatMap && combatMap.tokens.length > 0 && (
+            <MapaTatico
+              map={combatMap}
+              myUserId={me?.id}
+              isAdmin={isAdmin}
+              onMoveToken={async (tokenId, x, y) => {
+                if (!sessionId) return;
+                try {
+                  const sb = getSupabase();
+                  await sb.rpc("move_token", {
+                    p_session_id: sessionId,
+                    p_token_id: tokenId,
+                    p_x: x,
+                    p_y: y,
+                  });
+                } catch {}
+              }}
+              onAddEnemy={isAdmin ? async (name: string) => {
+                if (!sessionId || !combatMap) return;
+                const novo: MapToken = {
+                  id: `en-${Date.now().toString(36)}`,
+                  type: "enemy",
+                  name,
+                  x: combatMap.width - 2,
+                  y: 1 + Math.floor(Math.random() * (combatMap.height - 2)),
+                  color: "#a52a2a",
+                };
+                const novoMap = { ...combatMap, tokens: [...combatMap.tokens, novo] };
+                try {
+                  await getSupabase().from("sessions").update({ combat_map: novoMap }).eq("id", sessionId);
+                } catch {}
+              } : undefined}
+              onRemoveToken={isAdmin ? async (tokenId: string) => {
+                if (!sessionId || !combatMap) return;
+                const novoMap = { ...combatMap, tokens: combatMap.tokens.filter((t) => t.id !== tokenId) };
+                try {
+                  await getSupabase().from("sessions").update({ combat_map: novoMap }).eq("id", sessionId);
+                } catch {}
+              } : undefined}
+            />
           )}
           {/* Sprint B/F — badge de rodada (turn-based real, fora de combate) */}
           {!emCombate && roundPhase !== "idle" && (
@@ -3288,6 +3374,165 @@ function NpcEncontroModal({ npc, onClose }: { npc: NpcItem; onClose: () => void 
  * Mostra avatares ordenados por iniciativa, com HP e marcador do turno atual.
  * Admin pode avançar o turno do combate.
  */
+/**
+ * Sprint N — MapaTatico: grid SVG 16x12 com tokens.
+ * Click no token = seleciona. Click em célula = move (admin: qualquer; player: seu).
+ * Admin pode adicionar inimigos via input + remover via right-click.
+ */
+function MapaTatico({
+  map,
+  myUserId,
+  isAdmin,
+  onMoveToken,
+  onAddEnemy,
+  onRemoveToken,
+}: {
+  map: CombatMap;
+  myUserId: string | undefined;
+  isAdmin: boolean;
+  onMoveToken: (tokenId: string, x: number, y: number) => void | Promise<void>;
+  onAddEnemy?: (name: string) => void | Promise<void>;
+  onRemoveToken?: (tokenId: string) => void | Promise<void>;
+}) {
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [novoInimigo, setNovoInimigo] = useState("");
+  const cellSize = 32;
+  const w = map.width;
+  const h = map.height;
+
+  // Player só pode mover seu próprio token
+  function podeMover(t: MapToken): boolean {
+    if (isAdmin) return true;
+    if (t.type === "player" && t.user_id === myUserId) return true;
+    return false;
+  }
+
+  function corToken(t: MapToken): string {
+    if (t.color) return t.color;
+    if (t.type === "enemy") return "#a52a2a";
+    if (t.type === "npc") return "#c9a961";
+    if (t.user_id === myUserId) return "#ffd700";
+    return "#722f37";
+  }
+
+  return (
+    <div className="border-b border-[var(--color-pergaminho-velho)]/20 bg-[var(--color-carvao)]/40 px-3 py-2 sm:px-4">
+      <div className="flex items-baseline justify-between mb-2">
+        <p className="text-xs uppercase tracking-widest text-[var(--color-sangue)]">⚔ Mapa Tático {selectedId && <span className="text-[var(--color-pergaminho-velho)] normal-case ml-2">· clica numa célula pra mover</span>}</p>
+        {isAdmin && onAddEnemy && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!novoInimigo.trim()) return;
+              onAddEnemy(novoInimigo.trim());
+              setNovoInimigo("");
+            }}
+            className="flex gap-1"
+          >
+            <input
+              type="text"
+              value={novoInimigo}
+              onChange={(e) => setNovoInimigo(e.target.value.slice(0, 30))}
+              placeholder="+ inimigo"
+              className="text-[10px] px-2 py-0.5 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-sangue)]/40 text-[var(--color-pergaminho)] w-24"
+            />
+            <button type="submit" className="text-[10px] uppercase tracking-widest text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)]">+</button>
+          </form>
+        )}
+      </div>
+      <div className="overflow-auto">
+        <svg
+          viewBox={`0 0 ${w * cellSize} ${h * cellSize}`}
+          className="block max-w-full mx-auto rounded border border-[var(--color-pergaminho-velho)]/30 bg-[var(--color-noite)]/30"
+          style={{ maxHeight: 360 }}
+        >
+          {/* Grid */}
+          {Array.from({ length: w }).map((_, x) =>
+            Array.from({ length: h }).map((_, y) => (
+              <rect
+                key={`${x}-${y}`}
+                x={x * cellSize}
+                y={y * cellSize}
+                width={cellSize}
+                height={cellSize}
+                fill="transparent"
+                stroke="rgba(212,165,116,0.15)"
+                onClick={() => {
+                  if (!selectedId) return;
+                  const t = map.tokens.find((tk) => tk.id === selectedId);
+                  if (!t || !podeMover(t)) return;
+                  onMoveToken(selectedId, x, y);
+                  setSelectedId(null);
+                }}
+                style={{ cursor: selectedId ? "pointer" : "default" }}
+              />
+            ))
+          )}
+          {/* Tokens */}
+          {map.tokens.map((t) => {
+            const cx = t.x * cellSize + cellSize / 2;
+            const cy = t.y * cellSize + cellSize / 2;
+            const r = cellSize / 2 - 3;
+            const ehSelecionado = selectedId === t.id;
+            const podeInteragir = podeMover(t);
+            return (
+              <g
+                key={t.id}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!podeInteragir) return;
+                  setSelectedId(ehSelecionado ? null : t.id);
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  if (isAdmin && onRemoveToken && t.type !== "player") {
+                    if (confirm(`Remover ${t.name}?`)) onRemoveToken(t.id);
+                  }
+                }}
+                style={{ cursor: podeInteragir ? "pointer" : "default" }}
+              >
+                <circle
+                  cx={cx} cy={cy} r={r}
+                  fill={corToken(t)}
+                  stroke={ehSelecionado ? "#ffd700" : "rgba(244,232,200,0.5)"}
+                  strokeWidth={ehSelecionado ? 3 : 1.5}
+                />
+                <text
+                  x={cx} y={cy + 4}
+                  textAnchor="middle"
+                  fill="#1a1612"
+                  fontSize="10"
+                  fontWeight="bold"
+                  fontFamily="var(--font-cinzel)"
+                  pointerEvents="none"
+                >
+                  {(t.nick || t.name).slice(0, 2).toUpperCase()}
+                </text>
+                {/* HP bar pequena */}
+                {typeof t.hp_current === "number" && typeof t.hp_max === "number" && t.hp_max > 0 && (
+                  <>
+                    <rect x={cx - r} y={cy - r - 5} width={r * 2} height={2} fill="rgba(0,0,0,0.5)" />
+                    <rect
+                      x={cx - r}
+                      y={cy - r - 5}
+                      width={(r * 2) * Math.max(0, t.hp_current / t.hp_max)}
+                      height={2}
+                      fill="#a52a2a"
+                    />
+                  </>
+                )}
+              </g>
+            );
+          })}
+        </svg>
+      </div>
+      <p className="text-[10px] text-[var(--color-pergaminho-velho)] mt-1 italic text-center">
+        {isAdmin ? "Clica num token, depois numa célula pra mover. Right-click remove inimigos." : "Clica no teu token e depois numa célula pra mover."}
+      </p>
+    </div>
+  );
+}
+
 /**
  * RodadaBadge — Sprint B/F.
  * - Badge "Rodada N · Coletando · 2/4 agiram" + avatares ✓/⏳.

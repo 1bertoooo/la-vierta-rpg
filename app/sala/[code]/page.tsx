@@ -248,6 +248,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const dmChannelRef = useRef<{ send: (args: { type: string; event: string; payload?: Record<string, unknown> }) => unknown } | null>(null);
   // Set de event IDs já enviados pra TTS — evita duplicação em reconexão de realtime
   const ttsSentIdsRef = useRef<Set<string>>(new Set());
+  // Sprint D Bug 6 — anti-race do flushRound (useEffect + inline call concorrentes)
+  const flushRoundInFlightRef = useRef(false);
+  // Sprint D — última rodada já narrada (idempotência contra Bug 10 / re-narração loop)
+  const lastNarratedRoundRef = useRef<number>(0);
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -274,17 +278,34 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     return () => clearTimeout(t);
   }, [pendingRoll?.expiresAt, pendingRoll?.rolled, sessionId, pendingRoll?.target]);
 
-  // Sprint B — Admin dispara flushRound automaticamente quando fase vira 'narrating'.
-  // Cobre o caso de a última ação ter vindo de outro player (não-admin).
+  // Sprint B/D/E — Admin (ou solo player, ou shadow admin) dispara flushRound.
+  // Bug 3: solo player.
+  // Bug 7: shadow admin — se phase fica em 'narrating' por > 8s sem alguém disparar,
+  // o jogador com player.id alfabeticamente mais antigo (determinístico) assume o flush.
   useEffect(() => {
-    if (!isAdmin) return;
+    const ativos = players.filter((p) => p.user_id);
+    const sou1oOrdem = ativos.length > 0 && [...ativos].sort((a, b) => a.id.localeCompare(b.id))[0]?.user_id === me?.id;
+    const eligivelImediato = isAdmin || ativos.length === 1;
     if (roundPhase !== "narrating") return;
     if (aguardandoIA) return;
     if (pendingActions.length === 0) return;
-    // Dispara só uma vez por mudança de fase
-    flushRound();
+    if (flushRoundInFlightRef.current) return; // Bug 6 — anti-race
+    if (eligivelImediato) {
+      flushRoundInFlightRef.current = true;
+      flushRound().finally(() => { flushRoundInFlightRef.current = false; });
+      return;
+    }
+    // Shadow admin assume após 8s sem progresso (admin offline ou demorou)
+    if (sou1oOrdem) {
+      const t = setTimeout(() => {
+        if (roundPhase !== "narrating" || aguardandoIA || flushRoundInFlightRef.current) return;
+        flushRoundInFlightRef.current = true;
+        flushRound().finally(() => { flushRoundInFlightRef.current = false; });
+      }, 8000);
+      return () => clearTimeout(t);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roundPhase, isAdmin]);
+  }, [roundPhase, isAdmin, players.length]);
 
   useEffect(() => {
     setTtsOn(ttsIsEnabled());
@@ -826,11 +847,19 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           if (d.phase === "start") {
             setTimeout(() => sfxPlay("sword"), Math.max(0, delayMs));
             setTimeout(async () => {
-              if (sessionId) await sb.from("sessions").update({ in_combat: true }).eq("id", sessionId);
+              if (sessionId) {
+                await sb.from("sessions").update({ in_combat: true }).eq("id", sessionId);
+                // Bug 4 fix — entrar em combate limpa buffer de rodada (idempotente)
+                try { await sb.rpc("complete_round", { p_session_id: sessionId }); } catch {}
+              }
             }, Math.max(0, delayMs));
           } else {
             setTimeout(async () => {
-              if (sessionId) await sb.from("sessions").update({ in_combat: false }).eq("id", sessionId);
+              if (sessionId) {
+                await sb.from("sessions").update({ in_combat: false }).eq("id", sessionId);
+                // Bug 4 fix — sair de combate limpa buffer (resíduo de antes do combate)
+                try { await sb.rpc("complete_round", { p_session_id: sessionId }); } catch {}
+              }
             }, Math.max(0, delayMs));
           }
           break;
@@ -878,6 +907,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             });
             await sb.from("combat_initiative").insert(rows);
             await sb.from("sessions").update({ in_combat: true }).eq("id", sessionId);
+            // Bug 4 fix — limpa buffer de rodada quando combate começa
+            try { await sb.rpc("complete_round", { p_session_id: sessionId }); } catch {}
           }, Math.max(0, delayMs));
           break;
         }
@@ -917,14 +948,19 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           break;
         }
         case "aside": {
-          // Aside privado — só o player alvo recebe (lateral, em modal)
+          // Bug 9 fix — aside é privado. Não exibe pra outros via realtime do log:
+          // o filtro por target já cuida do display, mas o TEXTO ainda está no
+          // combat_log.payload visível via DevTools. Solução: o admin (que recebe
+          // a narração primeiro) faz broadcast via channel privado pro target,
+          // e o texto do aside é apagado da narração antes do display.
           const myNick = me?.nick;
           if (!myNick) break;
-          if (d.target.toLowerCase() !== myNick.toLowerCase()) break;
-          setTimeout(() => {
-            setAsideRecebido(d.text);
-            sfxPlay("bell");
-          }, Math.max(0, delayMs));
+          if (d.target.toLowerCase() === myNick.toLowerCase()) {
+            setTimeout(() => {
+              setAsideRecebido(d.text);
+              sfxPlay("bell");
+            }, Math.max(0, delayMs));
+          }
           break;
         }
         case "panel": {
@@ -1168,8 +1204,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       const pediuInit = dirs.some((d) => d.kind === "initiative");
       const pediuRoll = !!rollDir || pediuAttack || pediuInit;
 
-      // Sprint B — sincroniza pending_roll server-side (todos os clients sabem que tá rolando)
-      if (rollDir && rollDir.target && sessionId && isAdmin) {
+      // Sprint B/D — sincroniza pending_roll server-side (todos os clients sabem que tá rolando).
+      // Quem ganhou o lock_dm é responsável por essa transição (não exige isAdmin — Bug 1).
+      if (rollDir && rollDir.target && sessionId) {
         try {
           await sb.rpc("set_pending_roll", {
             p_session_id: sessionId,
@@ -1185,9 +1222,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       if (emCombate && !isOpening && !pediuRoll) {
         await setTurnoProximo();
       }
-      // Fora de combate (buffer): se NÃO pediu roll, fecha rodada (volta pra idle)
-      // Se pediu roll, fica em 'rolling' até alguém rolar (rolarDado limpa via clear_pending_roll)
-      if (!emCombate && !pediuRoll && sessionId && isAdmin) {
+      // Fora de combate (buffer): se NÃO pediu roll, fecha rodada (volta pra idle).
+      // Bug 1 fix: removido `&& isAdmin` — quem ganhou o lock_dm fecha a rodada.
+      // Cobre caso de não-admin ter rolado e disparado chamarDM com resultado.
+      if (!emCombate && !pediuRoll && sessionId) {
         try {
           await sb.rpc("complete_round", { p_session_id: sessionId });
         } catch {}
@@ -1199,6 +1237,13 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         event_type: "error",
         payload: { text: `Mestre se calou: ${msg}` },
       });
+      // Bug 5 fix — DM falhou: limpa server state pra não deixar phase preso em 'narrating'.
+      // complete_round é idempotente; chamando aqui reseta o ciclo pra próxima ação dar certo.
+      if (!emCombate && sessionId) {
+        try {
+          await sb.rpc("complete_round", { p_session_id: sessionId });
+        } catch {}
+      }
       try {
         dmChannelRef.current?.send({ type: "broadcast", event: "thinking-stop" });
       } catch {}
@@ -1371,8 +1416,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         event_type: "speak",
         payload: { text: txt, nick: me.nick || "viajante", round: result.round },
       });
-      // Se todos agiram, ADMIN dispara o DM (single source of truth)
-      if (result.all_acted && isAdmin) {
+      // Se todos agiram, dispara DM. Admin é a fonte da verdade (single caller),
+      // mas em sessão solo o próprio jogador dispara (Bug 3 fix — solo non-admin).
+      if (result.all_acted && (isAdmin || jogadoresAtivos.length <= 1)) {
         await flushRound();
       }
     } catch (e) {
@@ -1387,7 +1433,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   /**
    * Quando rodada fecha, monta o prompt agregado e chama o Mestre uma vez só.
-   * Só admin chama (senão N clients fariam N chamadas).
+   * Apenas admin (ou solo player) chama (senão N clients fariam N chamadas).
+   *
+   * Idempotência (Bug 10): se essa rodada já foi narrada, ignora. Isso protege
+   * contra useEffect re-disparando após bug intermediário deixar phase=narrating.
    */
   async function flushRound() {
     if (!sessionId || !campaign) return;
@@ -1397,10 +1446,17 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     const acoes = (sess?.pending_actions as PendingAction[]) || [];
     const round = (sess?.round_number as number) || roundNumber;
     if (acoes.length === 0) return;
+    // Idempotência — se já narrei essa rodada, skip (Bug 10).
+    if (lastNarratedRoundRef.current === round) return;
+    lastNarratedRoundRef.current = round;
+
+    // Bug 8 — valida targets de roll (Mestre alucina @nick inválido).
+    // Cruza nicks ativos para ajudar o LLM a NÃO alucinar.
+    const nicksAtivos = jogadoresAtivos.map((p) => p.display_name).join(", ");
 
     // Monta prompt agregado
     const linhas = acoes.map((a) => `@${a.nick}: ${a.text}`).join("\n");
-    const prompt = `[Rodada ${round} — Ações do grupo]\n${linhas}\n\nNarre o resultado costurando TODAS as ações conjuntamente. Cada jogador ganha pelo menos 1 frase de spotlight. Se for pedir rolagem, use [ROLL: ATR DC X @nick] com @nick específico.`;
+    const prompt = `[Rodada ${round} — Ações do grupo]\n${linhas}\n\nNarre o resultado costurando TODAS as ações conjuntamente. Cada jogador ganha pelo menos 1 frase de spotlight. Se for pedir rolagem, use [ROLL: ATR DC X @nick] com @nick específico — só vale @ entre os nicks ativos: ${nicksAtivos}.`;
 
     // Chama DM (silent: prompt agregado não vai pro log como speak)
     // Após resposta, chamarDM() decide:
@@ -1720,6 +1776,50 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               <button onClick={setTurnoProximo} className="text-xs text-[var(--color-dourado)] hover:text-[var(--color-dourado-claro)] uppercase tracking-widest block">
                 ▸ Passar turno
               </button>
+              {/* Sprint D Bug 2 — pular jogador AFK na rodada atual */}
+              {roundPhase === "collecting" && (
+                <div className="space-y-1">
+                  <p className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)]">⏭ Pular jogador na rodada</p>
+                  {jogadoresAtivos
+                    .filter((p) => p.user_id && !pendingActions.some((a) => a.player_id === p.user_id))
+                    .map((p) => (
+                      <button
+                        key={p.id}
+                        onClick={async () => {
+                          if (!sessionId || !p.user_id) return;
+                          try {
+                            const sb = getSupabase();
+                            await sb.rpc("skip_player_in_round", {
+                              p_session_id: sessionId,
+                              p_player_id: p.user_id,
+                              p_nick: p.display_name,
+                              p_total: jogadoresAtivos.length,
+                            });
+                          } catch {}
+                        }}
+                        className="text-[10px] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] block"
+                      >
+                        ⏭ {p.display_name}
+                      </button>
+                    ))}
+                </div>
+              )}
+              {/* Sprint D — forçar fim de rodada (emergência se phase preso) */}
+              {roundPhase !== "idle" && (
+                <button
+                  onClick={async () => {
+                    if (!sessionId) return;
+                    if (!confirm("Forçar fim da rodada? Limpa buffer e fila do Mestre.")) return;
+                    try {
+                      const sb = getSupabase();
+                      await sb.rpc("force_complete_round", { p_session_id: sessionId });
+                    } catch {}
+                  }}
+                  className="text-xs text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)] uppercase tracking-widest block"
+                >
+                  ⚠ Forçar fim de rodada
+                </button>
+              )}
               <button onClick={() => setShowResetModal(true)} className="text-xs text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)] uppercase tracking-widest block">
                 ⚜ Resetar campanha
               </button>
@@ -1736,7 +1836,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           {emCombate && iniciativa.length > 0 && (
             <IniciativaTracker iniciativa={iniciativa} myUserId={me?.id} isAdmin={isAdmin} />
           )}
-          {/* Sprint B — badge de rodada (turn-based real, fora de combate) */}
+          {/* Sprint B/F — badge de rodada (turn-based real, fora de combate) */}
           {!emCombate && roundPhase !== "idle" && (
             <RodadaBadge
               round={roundNumber}
@@ -1746,7 +1846,31 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               jogadores={jogadoresAtivos}
               acoes={pendingActions}
               myId={me?.id}
+              meuNick={me?.nick}
               targetRoll={pendingRoll?.target}
+              pendingRollDesc={pendingRoll?.raw}
+              isAdmin={isAdmin}
+              jaAgi={jaAgiNestaRodada}
+              onSkipMyTurn={async () => {
+                if (!sessionId || !me?.id) return;
+                try {
+                  const sb = getSupabase();
+                  await sb.rpc("skip_player_in_round", {
+                    p_session_id: sessionId,
+                    p_player_id: me.id,
+                    p_nick: me.nick || "viajante",
+                    p_total: jogadoresAtivos.length,
+                  });
+                } catch {}
+              }}
+              onForceComplete={async () => {
+                if (!sessionId) return;
+                if (!confirm("Forçar fim da rodada? Limpa buffer e fila do Mestre.")) return;
+                try {
+                  const sb = getSupabase();
+                  await sb.rpc("force_complete_round", { p_session_id: sessionId });
+                } catch {}
+              }}
             />
           )}
           <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
@@ -2755,8 +2879,11 @@ function NpcEncontroModal({ npc, onClose }: { npc: NpcItem; onClose: () => void 
  * Admin pode avançar o turno do combate.
  */
 /**
- * RodadaBadge — mostra o estado da rodada turn-based fora de combate.
- * Sprint B: visual feedback claro de "Rodada N · 2/4 agiram" + lista de quem agiu/falta.
+ * RodadaBadge — Sprint B/F.
+ * - Badge "Rodada N · Coletando · 2/4 agiram" + avatares ✓/⏳.
+ * - Sprint F: roll preview em rolling (mostra @target · CON DC 15 pra TODOS).
+ * - Sprint F: phase stuck warning (>60s sem progresso → admin pode forçar).
+ * - Sprint F: botão "Pular minha vez" pra player ativo na rodada.
  */
 function RodadaBadge({
   round,
@@ -2766,7 +2893,13 @@ function RodadaBadge({
   jogadores,
   acoes,
   myId,
+  meuNick,
   targetRoll,
+  pendingRollDesc,
+  isAdmin,
+  jaAgi,
+  onSkipMyTurn,
+  onForceComplete,
 }: {
   round: number;
   phase: "idle" | "collecting" | "narrating" | "rolling";
@@ -2775,7 +2908,13 @@ function RodadaBadge({
   jogadores: { id: string; display_name: string; user_id: string | null }[];
   acoes: { player_id: string; nick: string; text: string; ts: number }[];
   myId: string | undefined;
+  meuNick?: string | null;
   targetRoll?: string;
+  pendingRollDesc?: string;
+  isAdmin: boolean;
+  jaAgi: boolean;
+  onSkipMyTurn: () => void | Promise<void>;
+  onForceComplete: () => void | Promise<void>;
 }) {
   const fasesLabel: Record<typeof phase, string> = {
     idle: "Aguardando",
@@ -2789,9 +2928,23 @@ function RodadaBadge({
       ? "var(--color-sangue)"
       : "var(--color-pergaminho-velho)";
   const acoesNicks = new Set(acoes.map((a) => a.player_id));
+
+  // Sprint F — phase stuck warning (>60s parado em narrating/rolling)
+  const [stuckSeconds, setStuckSeconds] = useState(0);
+  useEffect(() => {
+    if (phase === "idle" || phase === "collecting") {
+      setStuckSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const t = setInterval(() => setStuckSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(t);
+  }, [phase]);
+  const ehStuck = stuckSeconds > 60;
+
   return (
     <div className="border-b border-[var(--color-pergaminho-velho)]/20 bg-[var(--color-carvao)]/30 px-4 py-2">
-      <div className="flex items-baseline justify-between gap-3">
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
         <p className="text-xs uppercase tracking-widest" style={{ color: cor }}>
           ⚜ Rodada {round} · {fasesLabel[phase]}
           {phase === "collecting" && total > 0 && (
@@ -2799,8 +2952,48 @@ function RodadaBadge({
               {count} / {total} agiram
             </span>
           )}
+          {(phase === "narrating" || phase === "rolling") && stuckSeconds > 8 && (
+            <span className="ml-2 text-[var(--color-pergaminho-velho)] normal-case tracking-normal">
+              ({stuckSeconds}s)
+            </span>
+          )}
         </p>
+        <div className="flex gap-2 items-center">
+          {/* Sprint F — botão "Pular minha vez" pro player que ainda não agiu */}
+          {phase === "collecting" && !jaAgi && myId && (
+            <button
+              onClick={onSkipMyTurn}
+              className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"
+              title="Não vou agir nesta rodada — observo"
+            >
+              ⏭ Pular minha vez
+            </button>
+          )}
+          {/* Sprint F — phase stuck warning + força fim */}
+          {ehStuck && isAdmin && (
+            <button
+              onClick={onForceComplete}
+              className="text-[10px] uppercase tracking-widest text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)]"
+              title="Phase travada — limpa e libera próxima rodada"
+            >
+              ⚠ Destravar
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Sprint F — roll dramatic preview (todos veem qual roll está sendo aguardado) */}
+      {phase === "rolling" && pendingRollDesc && (
+        <div className="mt-2 px-3 py-2 bg-[var(--color-sangue)]/15 border border-[var(--color-sangue)]/40 rounded text-center">
+          <p className="text-[10px] uppercase tracking-widest text-[var(--color-sangue)]">
+            🎲 {targetRoll} · {pendingRollDesc}
+          </p>
+          {targetRoll && meuNick && targetRoll.toLowerCase() === meuNick.toLowerCase() && (
+            <p className="text-[10px] text-[var(--color-dourado)] mt-1 italic">é tua rolagem · clica em Rolar abaixo</p>
+          )}
+        </div>
+      )}
+
       {phase === "collecting" && jogadores.length > 0 && (
         <div className="flex gap-1.5 overflow-x-auto pt-1.5">
           {jogadores.map((p) => {

@@ -145,6 +145,17 @@ type IniciativaItem = {
   is_current: boolean;
 };
 
+// Sprint B — Buffer de ações (turn-based real)
+type RoundPhase = "idle" | "collecting" | "narrating" | "rolling";
+type PendingAction = { player_id: string; nick: string; text: string; ts: number };
+type PendingRollServer = {
+  target_nick?: string;
+  attr?: string;
+  dc?: number;
+  vantage?: "advantage" | "disadvantage" | "normal";
+  expires_at?: number;
+};
+
 const SCROLL_DELAY = 80;
 
 export default function SalaPage({ params }: { params: Promise<{ code: string }> }) {
@@ -174,7 +185,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [showLiga, setShowLiga] = useState(false);
   const [showDados, setShowDados] = useState(false);
   const [showAudioPanel, setShowAudioPanel] = useState(false);
-  const [pendingRoll, setPendingRoll] = useState<{ raw: string; rolled: boolean } | null>(null);
+  const [pendingRoll, setPendingRoll] = useState<{ raw: string; rolled: boolean; target?: string; expiresAt?: number } | null>(null);
 
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -203,7 +214,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [iniciativa, setIniciativa] = useState<IniciativaItem[]>([]);
   const [emCombate, setEmCombate] = useState(false);
   // Pendência de ataque do mestre [ATTACK: ...] — botão pra rolar
-  const [pendingAttack, setPendingAttack] = useState<{ alvo: string; dice: string; ac?: number } | null>(null);
+  const [pendingAttack, setPendingAttack] = useState<{ alvo: string; dice: string; ac?: number; target?: string } | null>(null);
   // NPC recém-encontrado — modal épico com flair
   const [npcRecemConhecido, setNpcRecemConhecido] = useState<NpcItem | null>(null);
   // Tempo do dia e clima
@@ -222,6 +233,13 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   // Sumário rolante de campanha (anti voice drift do LLM)
   const [campaignSummary, setCampaignSummary] = useState<string>("");
   const [summaryEventCount, setSummaryEventCount] = useState<number>(0);
+  // Sprint B — buffer de rodadas
+  const [roundNumber, setRoundNumber] = useState<number>(0);
+  const [roundPhase, setRoundPhase] = useState<RoundPhase>("idle");
+  const [pendingActions, setPendingActions] = useState<PendingAction[]>([]);
+
+  // isAdmin precisa ser declarado cedo pois é usado em vários useEffects acima do early return
+  const isAdmin = me?.role === "admin";
   const summarizingRef = useRef(false);
   // Anti-flicker / cleanup do timeout do mestre
   const mestreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -239,6 +257,34 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     }, SCROLL_DELAY);
     return () => clearTimeout(t);
   }, [log.length]);
+
+  // Limpa pendingRoll expirado (90s — protege contra estado preso se Mestre nunca for re-acionado)
+  useEffect(() => {
+    if (!pendingRoll?.expiresAt) return;
+    const ms = pendingRoll.expiresAt - Date.now();
+    if (ms <= 0) { setPendingRoll(null); return; }
+    const t = setTimeout(() => {
+      // Limpa só se ainda for o mesmo roll pendente e não foi rolado
+      setPendingRoll((cur) => (cur && !cur.rolled && cur.expiresAt && Date.now() >= cur.expiresAt ? null : cur));
+      // Server-side: limpa também se for de target específico
+      if (sessionId && pendingRoll.target) {
+        getSupabase().rpc("clear_pending_roll", { p_session_id: sessionId }).catch(() => {});
+      }
+    }, ms + 100);
+    return () => clearTimeout(t);
+  }, [pendingRoll?.expiresAt, pendingRoll?.rolled, sessionId, pendingRoll?.target]);
+
+  // Sprint B — Admin dispara flushRound automaticamente quando fase vira 'narrating'.
+  // Cobre o caso de a última ação ter vindo de outro player (não-admin).
+  useEffect(() => {
+    if (!isAdmin) return;
+    if (roundPhase !== "narrating") return;
+    if (aguardandoIA) return;
+    if (pendingActions.length === 0) return;
+    // Dispara só uma vez por mudança de fase
+    flushRound();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roundPhase, isAdmin]);
 
   useEffect(() => {
     setTtsOn(ttsIsEnabled());
@@ -405,9 +451,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             const { data: events } = await sb.from("combat_log").select("*").eq("session_id", sId as string).order("created_at", { ascending: true }).limit(200);
             if (!cancelled) setLog((events as LogEvent[]) || []);
 
-            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather, doom_clocks, summary, summary_event_count").eq("id", sId).maybeSingle();
+            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather, doom_clocks, summary, summary_event_count, round_number, round_phase, pending_actions, pending_roll").eq("id", sId).maybeSingle();
             if (!cancelled && sess) {
-              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number };
+              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number; round_number?: number; round_phase?: RoundPhase; pending_actions?: PendingAction[]; pending_roll?: PendingRollServer | null };
               setCurrentTurnUserId(s.current_turn_player_id);
               setEmCombate(!!s.in_combat);
               if (s.time_of_day) setTimeOfDay(s.time_of_day);
@@ -415,6 +461,17 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               if (s.doom_clocks) setDoomClocks(s.doom_clocks);
               if (s.summary) setCampaignSummary(s.summary);
               if (typeof s.summary_event_count === "number") setSummaryEventCount(s.summary_event_count);
+              if (typeof s.round_number === "number") setRoundNumber(s.round_number);
+              if (s.round_phase) setRoundPhase(s.round_phase);
+              if (Array.isArray(s.pending_actions)) setPendingActions(s.pending_actions);
+              if (s.pending_roll) {
+                setPendingRoll({
+                  raw: `${s.pending_roll.attr || "1d20"}${s.pending_roll.dc ? ` DC ${s.pending_roll.dc}` : ""}${s.pending_roll.vantage && s.pending_roll.vantage !== "normal" ? ` ${s.pending_roll.vantage === "advantage" ? "vantagem" : "desvantagem"}` : ""}`,
+                  rolled: false,
+                  target: s.pending_roll.target_nick,
+                  expiresAt: s.pending_roll.expires_at,
+                });
+              }
             }
 
             // Iniciativa do combate atual (resilient se tabela ainda não migrada)
@@ -524,6 +581,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                   if (rollDir) setPendingRoll({
                     raw: `${rollDir.attr || "1d20"}${rollDir.dc ? ` DC ${rollDir.dc}` : ""}${rollDir.vantage && rollDir.vantage !== "normal" ? ` ${rollDir.vantage === "advantage" ? "vantagem" : "desvantagem"}` : ""}`,
                     rolled: false,
+                    target: rollDir.target,
+                    expiresAt: Date.now() + 90_000, // 90s timeout — lifecycle de pendingRoll
                   });
                   if (rollDir?.vantage === "advantage") setVantageMode("advantage");
                   else if (rollDir?.vantage === "disadvantage") setVantageMode("disadvantage");
@@ -568,7 +627,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           ).on(
             "postgres_changes", { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sId}` },
             (payload) => {
-              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number };
+              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number; round_number?: number; round_phase?: RoundPhase; pending_actions?: PendingAction[]; pending_roll?: PendingRollServer | null };
               setCurrentTurnUserId(sess.current_turn_player_id);
               if (typeof sess.in_combat === "boolean") setEmCombate(sess.in_combat);
               if (sess.time_of_day) setTimeOfDay(sess.time_of_day);
@@ -576,6 +635,24 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               if (sess.doom_clocks) setDoomClocks(sess.doom_clocks);
               if (sess.summary !== undefined) setCampaignSummary(sess.summary);
               if (typeof sess.summary_event_count === "number") setSummaryEventCount(sess.summary_event_count);
+              // Buffer de rodadas
+              if (typeof sess.round_number === "number") setRoundNumber(sess.round_number);
+              if (sess.round_phase) setRoundPhase(sess.round_phase);
+              if (Array.isArray(sess.pending_actions)) setPendingActions(sess.pending_actions);
+              // Pending roll vindo do server (sincroniza entre clients)
+              if (sess.pending_roll === null) {
+                setPendingRoll(null);
+              } else if (sess.pending_roll) {
+                const pr = sess.pending_roll;
+                setPendingRoll({
+                  raw: `${pr.attr || "1d20"}${pr.dc ? ` DC ${pr.dc}` : ""}${pr.vantage && pr.vantage !== "normal" ? ` ${pr.vantage === "advantage" ? "vantagem" : "desvantagem"}` : ""}`,
+                  rolled: false,
+                  target: pr.target_nick,
+                  expiresAt: pr.expires_at,
+                });
+                if (pr.vantage === "advantage") setVantageMode("advantage");
+                else if (pr.vantage === "disadvantage") setVantageMode("disadvantage");
+              }
             }
           ).on(
             "postgres_changes", { event: "*", schema: "public", table: "combat_initiative", filter: `session_id=eq.${sId}` },
@@ -808,7 +885,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           // Player que tá pegando essa diretiva pode rolar o ataque
           if (d.dice) {
             setTimeout(() => {
-              setPendingAttack({ alvo: d.alvo || "alvo", dice: d.dice!, ac: d.ac });
+              setPendingAttack({ alvo: d.alvo || "alvo", dice: d.dice!, ac: d.ac, target: d.target });
               sfxPlay("sword");
             }, Math.max(0, delayMs));
           }
@@ -1086,9 +1163,34 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
       // Avança turno automaticamente após resposta da IA (se não pediu roll)
       const dirs = parseDirectives(textComDirs);
-      const pediuRoll = dirs.some((d) => d.kind === "roll" || d.kind === "attack" || d.kind === "initiative");
-      if (!isOpening && !pediuRoll) {
+      const rollDir = dirs.find((d): d is Extract<Directive, { kind: "roll" }> => d.kind === "roll");
+      const pediuAttack = dirs.some((d) => d.kind === "attack");
+      const pediuInit = dirs.some((d) => d.kind === "initiative");
+      const pediuRoll = !!rollDir || pediuAttack || pediuInit;
+
+      // Sprint B — sincroniza pending_roll server-side (todos os clients sabem que tá rolando)
+      if (rollDir && rollDir.target && sessionId && isAdmin) {
+        try {
+          await sb.rpc("set_pending_roll", {
+            p_session_id: sessionId,
+            p_target_nick: rollDir.target,
+            p_attr: rollDir.attr || null,
+            p_dc: rollDir.dc || null,
+            p_vantage: rollDir.vantage || "normal",
+          });
+        } catch {}
+      }
+
+      // Em combate (turn-based linear), avança turno se não pediu roll
+      if (emCombate && !isOpening && !pediuRoll) {
         await setTurnoProximo();
+      }
+      // Fora de combate (buffer): se NÃO pediu roll, fecha rodada (volta pra idle)
+      // Se pediu roll, fica em 'rolling' até alguém rolar (rolarDado limpa via clear_pending_roll)
+      if (!emCombate && !pediuRoll && sessionId && isAdmin) {
+        try {
+          await sb.rpc("complete_round", { p_session_id: sessionId });
+        } catch {}
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Erro";
@@ -1162,9 +1264,15 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     const wasPending = !!pendingRoll;
     if (pendingRoll) setPendingRoll(null); // limpa imediatamente
     setVantageMode("normal");
+    // Server-side: limpa pending_roll pra todos os clients (inclui o broadcast)
+    if (wasPending && sessionId) {
+      try {
+        await getSupabase().rpc("clear_pending_roll", { p_session_id: sessionId });
+      } catch {}
+    }
     // Se era pendente (Mestre pediu), automaticamente chama o DM pra narrar resultado
     if (wasPending && !aguardandoIA) {
-      const prompt = `[rolagem do mestre que ele pediu] ${rollText}. Narre o resultado, considerando se foi sucesso, falha, crítico ou fumble. Continue a cena.`;
+      const prompt = `[rolagem do mestre que ele pediu] @${me?.nick || "viajante"} ${rollText}. Narre o resultado, considerando se foi sucesso, falha, crítico ou fumble. Continue a cena.`;
       // silent: NÃO loga esse prompt como fala do player (é trigger interno pro Mestre)
       await chamarDM(prompt, { silent: true });
     }
@@ -1209,10 +1317,96 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   async function enviarAcao(e?: React.FormEvent) {
     e?.preventDefault();
     const txt = acaoTexto.trim().slice(0, 1000); // hard limit 1000 chars
-    if (!txt || aguardandoIA) return;
-    if (!ehMeuTurno) return;
+    if (!txt) return;
     setAcaoTexto("");
-    await chamarDM(txt);
+    await enviarAcaoTexto(txt);
+  }
+
+  /**
+   * Sprint B — submete ação ao buffer da rodada (turn-based real).
+   * Quando todos jogadores ativos agirem, dispara DM via flushRound (admin only).
+   * Em combate, mantém comportamento de turno linear (current_turn_player_id).
+   */
+  async function enviarAcaoTexto(txt: string) {
+    if (!txt || !sessionId || !me?.id) return;
+    if (aguardandoIA || mestreEscrevendo) return;
+    if (pendingRoll && !pendingRoll.rolled) return; // rolagem pendente bloqueia ação
+    if (jaAgiNestaRodada) return;
+
+    // Em combate, mantemos turn-based linear (current_turn_player_id) — bypass buffer.
+    if (emCombate) {
+      if (!ehMeuTurno) return;
+      await chamarDM(txt);
+      return;
+    }
+
+    // Fora de combate: usa buffer turn-based real.
+    const sb = getSupabase();
+    const totalAtivos = jogadoresAtivos.length;
+    if (totalAtivos === 0) {
+      await chamarDM(txt); // fallback: jogador solo
+      return;
+    }
+    try {
+      const { data, error } = await sb.rpc("submit_action", {
+        p_session_id: sessionId,
+        p_player_id: me.id,
+        p_nick: me.nick || "viajante",
+        p_text: txt,
+        p_total: totalAtivos,
+      });
+      if (error) throw error;
+      const result = data as { ok: boolean; reason?: string; phase?: RoundPhase; round?: number; count?: number; total?: number; all_acted?: boolean };
+      if (!result?.ok) {
+        await logEvent({
+          actor_type: "system",
+          event_type: "info",
+          payload: { text: result?.reason === "already_acted" ? "Tu já agiu nesta rodada — aguarda" : "Não dá pra agir agora" },
+        });
+        return;
+      }
+      // Loga visualmente que o player agiu (visível no log de TODOS)
+      await logEvent({
+        actor_type: "player",
+        event_type: "speak",
+        payload: { text: txt, nick: me.nick || "viajante", round: result.round },
+      });
+      // Se todos agiram, ADMIN dispara o DM (single source of truth)
+      if (result.all_acted && isAdmin) {
+        await flushRound();
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Erro";
+      await logEvent({
+        actor_type: "system",
+        event_type: "error",
+        payload: { text: `Falha ao registrar ação: ${msg}` },
+      });
+    }
+  }
+
+  /**
+   * Quando rodada fecha, monta o prompt agregado e chama o Mestre uma vez só.
+   * Só admin chama (senão N clients fariam N chamadas).
+   */
+  async function flushRound() {
+    if (!sessionId || !campaign) return;
+    const sb = getSupabase();
+    // Re-lê pending_actions FRESH do server pra evitar stale state
+    const { data: sess } = await sb.from("sessions").select("pending_actions, round_number").eq("id", sessionId).maybeSingle();
+    const acoes = (sess?.pending_actions as PendingAction[]) || [];
+    const round = (sess?.round_number as number) || roundNumber;
+    if (acoes.length === 0) return;
+
+    // Monta prompt agregado
+    const linhas = acoes.map((a) => `@${a.nick}: ${a.text}`).join("\n");
+    const prompt = `[Rodada ${round} — Ações do grupo]\n${linhas}\n\nNarre o resultado costurando TODAS as ações conjuntamente. Cada jogador ganha pelo menos 1 frase de spotlight. Se for pedir rolagem, use [ROLL: ATR DC X @nick] com @nick específico.`;
+
+    // Chama DM (silent: prompt agregado não vai pro log como speak)
+    // Após resposta, chamarDM() decide:
+    //   - Pediu roll → set_pending_roll (fase 'rolling')
+    //   - NÃO pediu roll → complete_round (fase 'idle', buffer limpo, próxima rodada abre)
+    await chamarDM(prompt, { silent: true });
   }
 
   async function abrirCenaInicial() {
@@ -1356,8 +1550,24 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     );
   }
 
-  const isAdmin = me?.role === "admin";
   const ehMeuTurno = !currentTurnUserId || currentTurnUserId === me?.id;
+
+  // Roll com alvo: se Mestre marcou @nick, só esse player vê o botão.
+  // Sem target (raro — INITIATIVE coletiva) qualquer player pode rolar (cai no ehMeuTurno legacy).
+  const meuNickLower = (me?.nick || "").toLowerCase();
+  const ehMeuRoll = pendingRoll
+    ? (pendingRoll.target
+        ? pendingRoll.target.toLowerCase() === meuNickLower
+        : ehMeuTurno) // fallback: sem target, regra antiga
+    : false;
+
+  // Sprint B — buffer de rodadas
+  // "Jogadores ativos" = quem tem user_id setado E foi visto nos últimos 5 min
+  const cincoMinAtras = Date.now() - 5 * 60 * 1000;
+  const jogadoresAtivos = players.filter((p) => p.user_id && new Date(p.last_seen_at).getTime() > cincoMinAtras);
+  const jaAgiNestaRodada = !!me?.id && pendingActions.some((a) => a.player_id === me.id);
+  const aguardandoOutros = roundPhase === "collecting" && jaAgiNestaRodada;
+  const totalRodada = jogadoresAtivos.length || players.filter((p) => p.user_id).length || 1;
 
   // Overlay visual de tempo/clima (não-intrusivo, fica acima do conteúdo)
   const ambienteOverlay = (() => {
@@ -1526,6 +1736,19 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           {emCombate && iniciativa.length > 0 && (
             <IniciativaTracker iniciativa={iniciativa} myUserId={me?.id} isAdmin={isAdmin} />
           )}
+          {/* Sprint B — badge de rodada (turn-based real, fora de combate) */}
+          {!emCombate && roundPhase !== "idle" && (
+            <RodadaBadge
+              round={roundNumber}
+              phase={roundPhase}
+              count={pendingActions.length}
+              total={totalRodada}
+              jogadores={jogadoresAtivos}
+              acoes={pendingActions}
+              myId={me?.id}
+              targetRoll={pendingRoll?.target}
+            />
+          )}
           <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
             {log.length === 0 && (
               <div className="text-center py-12">
@@ -1550,7 +1773,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
           {/* Input */}
           <form onSubmit={(e) => e.preventDefault()} className="border-t border-[var(--color-pergaminho-velho)]/20 p-3 flex gap-2 bg-[var(--color-carvao)]/40">
-            {pendingRoll && !pendingRoll.rolled && ehMeuTurno && (
+            {pendingRoll && !pendingRoll.rolled && ehMeuRoll && (
               <button type="button" onClick={() => {
                 // Parse atributo da diretriz (FOR/DES/CON/INT/SAB/CAR ou STR/DEX/etc)
                 const m = pendingRoll.raw.match(/\b(for|des|con|int|sab|car|str|dex|wis|cha)\b/i);
@@ -1565,7 +1788,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 Rolar: {pendingRoll.raw}
               </button>
             )}
-            {pendingAttack && ehMeuTurno && (
+            {pendingAttack && (pendingAttack.target ? pendingAttack.target.toLowerCase() === meuNickLower : ehMeuTurno) && (
               <button type="button" onClick={async () => {
                 // Rola ataque + compara com AC
                 const r = rolarDados(pendingAttack.dice, vantageMode);
@@ -1595,11 +1818,21 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               </button>
             )}
             <MicAcao
-              disabled={aguardandoIA || !ehMeuTurno}
-              placeholder={ehMeuTurno ? "Aperta o microfone e fala tua ação" : `Aguardando ${players.find((p) => p.user_id === currentTurnUserId)?.display_name || "outro jogador"}…`}
+              disabled={aguardandoIA || mestreEscrevendo || !ehMeuTurno || !!pendingRoll || jaAgiNestaRodada}
+              placeholder={
+                mestreEscrevendo
+                  ? "Mestre tecendo a cena, aguarda…"
+                  : pendingRoll
+                  ? (ehMeuRoll ? "Tu deve rolar primeiro" : `Aguardando rolagem${pendingRoll.target ? ` de ${pendingRoll.target}` : ""}…`)
+                  : jaAgiNestaRodada
+                  ? "Já agiu nesta rodada — aguarda os outros"
+                  : ehMeuTurno
+                  ? "Aperta o microfone e fala tua ação"
+                  : `Aguardando ${players.find((p) => p.user_id === currentTurnUserId)?.display_name || "outro jogador"}…`
+              }
               onTranscribed={async (texto) => {
-                if (!texto.trim() || aguardandoIA) return;
-                await chamarDM(texto.trim().slice(0, 1000));
+                if (!texto.trim() || aguardandoIA || mestreEscrevendo) return;
+                await enviarAcaoTexto(texto.trim().slice(0, 1000));
               }}
             />
           </form>
@@ -2521,6 +2754,78 @@ function NpcEncontroModal({ npc, onClose }: { npc: NpcItem; onClose: () => void 
  * Mostra avatares ordenados por iniciativa, com HP e marcador do turno atual.
  * Admin pode avançar o turno do combate.
  */
+/**
+ * RodadaBadge — mostra o estado da rodada turn-based fora de combate.
+ * Sprint B: visual feedback claro de "Rodada N · 2/4 agiram" + lista de quem agiu/falta.
+ */
+function RodadaBadge({
+  round,
+  phase,
+  count,
+  total,
+  jogadores,
+  acoes,
+  myId,
+  targetRoll,
+}: {
+  round: number;
+  phase: "idle" | "collecting" | "narrating" | "rolling";
+  count: number;
+  total: number;
+  jogadores: { id: string; display_name: string; user_id: string | null }[];
+  acoes: { player_id: string; nick: string; text: string; ts: number }[];
+  myId: string | undefined;
+  targetRoll?: string;
+}) {
+  const fasesLabel: Record<typeof phase, string> = {
+    idle: "Aguardando",
+    collecting: "Coletando ações",
+    narrating: "Mestre tecendo a cena",
+    rolling: targetRoll ? `Aguardando rolagem de ${targetRoll}` : "Aguardando rolagem",
+  };
+  const cor = phase === "narrating"
+    ? "var(--color-dourado)"
+    : phase === "rolling"
+      ? "var(--color-sangue)"
+      : "var(--color-pergaminho-velho)";
+  const acoesNicks = new Set(acoes.map((a) => a.player_id));
+  return (
+    <div className="border-b border-[var(--color-pergaminho-velho)]/20 bg-[var(--color-carvao)]/30 px-4 py-2">
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="text-xs uppercase tracking-widest" style={{ color: cor }}>
+          ⚜ Rodada {round} · {fasesLabel[phase]}
+          {phase === "collecting" && total > 0 && (
+            <span className="ml-2 text-[var(--color-pergaminho-velho)] normal-case tracking-normal">
+              {count} / {total} agiram
+            </span>
+          )}
+        </p>
+      </div>
+      {phase === "collecting" && jogadores.length > 0 && (
+        <div className="flex gap-1.5 overflow-x-auto pt-1.5">
+          {jogadores.map((p) => {
+            const agiu = acoesNicks.has(p.user_id || "");
+            const eu = p.user_id === myId;
+            return (
+              <span
+                key={p.id}
+                className={`flex-shrink-0 px-2 py-0.5 rounded text-[10px] uppercase tracking-widest border ${
+                  agiu
+                    ? "bg-[var(--color-floresta)]/30 border-[var(--color-floresta)] text-[var(--color-pergaminho)]"
+                    : "bg-[var(--color-carvao)]/60 border-[var(--color-pergaminho-velho)]/30 text-[var(--color-pergaminho-velho)]"
+                } ${eu ? "ring-1 ring-[var(--color-dourado)]/50" : ""}`}
+                title={agiu ? "agiu" : "aguardando"}
+              >
+                {agiu ? "✓ " : "⏳ "}{p.display_name}
+              </span>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function IniciativaTracker({
   iniciativa,
   myUserId,

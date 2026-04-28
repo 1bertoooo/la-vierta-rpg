@@ -12,6 +12,7 @@ import { DM_OPENING_PROMPT } from "@/lib/dm-prompt";
 import {
   audioInit,
   audioPlayMood,
+  audioPlayFromNarration,
   audioStop,
   audioIsMuted,
   audioSetMuted,
@@ -19,7 +20,6 @@ import {
   audioGetVolume,
   audioResumeIfBlocked,
   audioIsPlaying,
-  type Mood,
 } from "@/lib/audio";
 
 type Player = {
@@ -258,11 +258,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               if (ev.actor_type === "dm" && directives?.roll) {
                 setPendingRoll({ raw: directives.roll, rolled: false });
               }
-              if (ev.actor_type === "dm" && directives?.music_mood) {
-                const m = directives.music_mood as Mood;
-                if (["tavern", "battle", "dungeon", "boss", "calm", "silence"].includes(m)) {
-                  audioPlayMood(m);
-                }
+              if (ev.actor_type === "dm") {
+                const txt = (ev.payload.text as string) || "";
+                // Sempre aciona música: explícita > detectada > fallback
+                audioPlayFromNarration({ explicit_mood: directives?.music_mood ?? null, text: txt });
               }
             }
           ).on(

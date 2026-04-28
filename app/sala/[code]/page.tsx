@@ -1088,8 +1088,35 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     const r = rolarDados(expr, efetivaVantage);
     if (!r) return;
     sfxPlay("dice");
-    if (r.critical) sfxPlay("crit");
-    else if (r.fumble) sfxPlay("fumble");
+    if (r.critical) {
+      sfxPlay("crit");
+      // 20 natural → +1 Esperança da Liga (Daggerheart-style)
+      if (sessionId) {
+        const sb = getSupabase();
+        const novosClocks = { ...doomClocks };
+        if (novosClocks.esperanca) {
+          novosClocks.esperanca = {
+            ...novosClocks.esperanca,
+            current: Math.min(novosClocks.esperanca.max, novosClocks.esperanca.current + 1),
+          };
+          sb.from("sessions").update({ doom_clocks: novosClocks }).eq("id", sessionId).then(() => {});
+        }
+      }
+    } else if (r.fumble) {
+      sfxPlay("fumble");
+      // 1 natural → +1 Sina da Pandórica
+      if (sessionId) {
+        const sb = getSupabase();
+        const novosClocks = { ...doomClocks };
+        if (novosClocks.sina) {
+          novosClocks.sina = {
+            ...novosClocks.sina,
+            current: Math.min(novosClocks.sina.max, novosClocks.sina.current + 1),
+          };
+          sb.from("sessions").update({ doom_clocks: novosClocks }).eq("id", sessionId).then(() => {});
+        }
+      }
+    }
     const vantageStr = r.bothD20
       ? ` (${r.vantage === "advantage" ? "vantagem" : "desvantagem"}: ${r.bothD20[0]} ${r.vantage === "advantage" ? "↑" : "↓"} ${r.bothD20[1]})`
       : "";
@@ -2233,8 +2260,9 @@ function SpotlightBar({ players, log }: { players: Player[]; log: LogEvent[] }) 
  * ClocksBar — Doom clocks visíveis (Vincent Baker / John Harper).
  * Mostra 3 relógios com segmentos preenchidos. Ameaça implícita.
  */
-function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: number; label?: string }> }) {
-  const order = ["doom", "arco", "situacional"];
+function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: number; label?: string; tipo?: string }> }) {
+  // Doom em vermelho/vinho, Arco em vinho/dourado, Situacional dourado, Esperança verde-dourado, Sina sangue
+  const order = ["esperanca", "sina", "doom", "arco", "situacional"];
   const visible = order.filter((k) => clocks[k] && clocks[k].max > 0);
   if (visible.length === 0) return null;
   return (
@@ -2242,16 +2270,23 @@ function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: 
       {visible.map((k) => {
         const c = clocks[k];
         const pct = (c.current / c.max) * 100;
-        const cor =
-          k === "doom" ? "from-[var(--color-sangue)] to-[var(--color-vinho)]"
-          : k === "arco" ? "from-[var(--color-vinho)] to-[var(--color-dourado)]/60"
-          : "from-[var(--color-dourado)]/40 to-[var(--color-dourado)]";
+        const isHope = k === "esperanca" || c.tipo === "hope";
+        const isFear = k === "sina" || c.tipo === "fear";
+        const cor = isHope
+          ? "from-emerald-600/60 to-[var(--color-dourado)]"
+          : isFear
+            ? "from-[var(--color-sangue)] to-purple-900"
+            : k === "doom"
+              ? "from-[var(--color-sangue)] to-[var(--color-vinho)]"
+              : k === "arco"
+                ? "from-[var(--color-vinho)] to-[var(--color-dourado)]/60"
+                : "from-[var(--color-dourado)]/40 to-[var(--color-dourado)]";
+        const icone = isHope ? "✨" : isFear ? "🩸" : k === "doom" ? "⚰" : k === "arco" ? "⌛" : "⚡";
         return (
           <div key={k} className="flex items-center gap-2 min-w-0 flex-shrink-0" title={`${c.label || k}: ${c.current}/${c.max}`}>
             <span className="text-[9px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] flex-shrink-0">
-              {k === "doom" ? "⚰" : k === "arco" ? "⌛" : "⚡"} {c.current}/{c.max}
+              {icone} {c.current}/{c.max}
             </span>
-            {/* Segmentos clicáveis-style (visualmente apenas) */}
             <div className="flex gap-0.5">
               {Array.from({ length: c.max }).map((_, i) => (
                 <span
@@ -2269,8 +2304,11 @@ function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: 
                 {c.label}
               </span>
             )}
-            {pct >= 75 && (
+            {!isHope && pct >= 75 && (
               <span className="text-[10px] text-[var(--color-sangue)] animate-pulse">●</span>
+            )}
+            {isHope && pct >= 75 && (
+              <span className="text-[10px] text-emerald-400 animate-pulse">●</span>
             )}
           </div>
         );

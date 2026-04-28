@@ -262,11 +262,20 @@ export const SEXOS: { key: SexoKey; nome: string; en: string }[] = [
   { key: "androgino", nome: "Andrógino", en: "androgynous" },
 ];
 
+// 4 variações de mood/iluminação pros 4 retratos saírem distintos
+const VARIACOES_RETRATO = [
+  "intense gaze, dramatic chiaroscuro candle lighting from below",
+  "battle-worn weathered face with scars, golden hour rim lighting",
+  "mystical glowing eyes, blue moonlight from window",
+  "calm noble expression, warm fireplace lighting from side",
+];
+
 export function promptRetrato(opts: {
   raca: RacaKey;
   classe: ClasseKey;
   sexo?: SexoKey;
   aparencia?: string;
+  variacao?: number; // 0-3
 }): string {
   const sexoEn = opts.sexo ? SEXOS.find((s) => s.key === opts.sexo)?.en || "" : "";
   const racaEn = {
@@ -278,17 +287,20 @@ export function promptRetrato(opts: {
     tiefling: "tiefling with red skin and horns",
   }[opts.raca];
   const classeEn = {
-    guerreiro: "fighter wearing armor holding a sword",
-    mago: "wizard in dark robes holding a staff",
+    guerreiro: "fighter wearing armor",
+    mago: "wizard in dark robes",
     clerigo: "cleric with a holy symbol",
-    ladino: "rogue with hood and dagger",
-    barbaro: "barbarian with painted face holding an axe",
-    bardo: "bard with a lute",
+    ladino: "rogue with hood",
+    barbaro: "barbarian with painted face",
+    bardo: "bard",
   }[opts.classe];
 
   const detalhes = opts.aparencia?.trim() ? `, ${opts.aparencia.trim()}` : "";
+  const variacao = opts.variacao !== undefined
+    ? VARIACOES_RETRATO[opts.variacao % VARIACOES_RETRATO.length]
+    : VARIACOES_RETRATO[0];
 
-  return `Epic dark fantasy portrait of a ${sexoEn} ${racaEn} ${classeEn}${detalhes}, headshot, oil painting, dramatic candle lighting, dungeons and dragons concept art, detailed expressive face, painted by larry elmore wayne reynolds tyler jacobson, high quality, deep colors, atmospheric, no text, no watermark`;
+  return `Epic dark fantasy portrait painting of a ${sexoEn} ${racaEn} ${classeEn}${detalhes}. ${variacao}. Headshot, oil painting, dungeons and dragons concept art style by Larry Elmore and Wayne Reynolds. Detailed expressive face, deep saturated colors, atmospheric, brush strokes visible. No text, no watermark.`;
 }
 
 // Perguntas pra gerar background com IA

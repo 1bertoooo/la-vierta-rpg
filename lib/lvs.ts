@@ -295,12 +295,13 @@ export function promptRetrato(opts: {
     bardo: "bard",
   }[opts.classe];
 
-  const detalhes = opts.aparencia?.trim() ? `, ${opts.aparencia.trim()}` : "";
+  // Aparência vai pro INÍCIO (peso semântico maior em Stable Diffusion)
+  const detalhes = opts.aparencia?.trim() ? `${opts.aparencia.trim()}, ` : "";
   const variacao = opts.variacao !== undefined
     ? VARIACOES_RETRATO[opts.variacao % VARIACOES_RETRATO.length]
     : VARIACOES_RETRATO[0];
 
-  return `Epic dark fantasy portrait painting of a ${sexoEn} ${racaEn} ${classeEn}${detalhes}. ${variacao}. Headshot, oil painting, dungeons and dragons concept art style by Larry Elmore and Wayne Reynolds. Detailed expressive face, deep saturated colors, atmospheric, brush strokes visible. No text, no watermark.`;
+  return `${detalhes}${sexoEn} ${racaEn} ${classeEn}, ${variacao}, epic dark fantasy portrait painting, headshot, oil painting, dungeons and dragons concept art, Larry Elmore Wayne Reynolds style, detailed expressive face, deep saturated colors, atmospheric, brush strokes visible. No text, no watermark.`;
 }
 
 // Perguntas pra gerar background com IA

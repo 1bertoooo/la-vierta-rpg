@@ -65,6 +65,9 @@ export default function CriacaoPage({
   const [retratoEstados, setRetratoEstados] = useState<("pendente" | "carregando" | "ok" | "erro")[]>(["pendente", "pendente", "pendente", "pendente"]);
   // Counter incrementa em cada re-roll pra forçar React refazer img
   const [retratoVersion, setRetratoVersion] = useState(0);
+  // Aparência traduzida pra inglês (otimiza prompt do Stable Diffusion)
+  const [aparenciaEn, setAparenciaEn] = useState<string>("");
+  const [traduzindoAparencia, setTraduzindoAparencia] = useState(false);
 
   const [erro, setErro] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -136,15 +139,40 @@ export default function CriacaoPage({
     });
   }
 
-  function regerarRetratos() {
+  // Traduz a aparência pt→en uma vez (chamado quando user passa pro retrato)
+  async function traduzirAparencia(): Promise<string> {
+    if (!aparencia.trim()) return "";
+    if (aparenciaEn) return aparenciaEn; // cache
+    setTraduzindoAparencia(true);
+    try {
+      const r = await fetch("/api/translate-look", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: aparencia }),
+      });
+      const data = await r.json();
+      const en = (data.translated as string) || aparencia;
+      setAparenciaEn(en);
+      return en;
+    } catch {
+      // Fallback: usa texto original mesmo
+      setAparenciaEn(aparencia);
+      return aparencia;
+    } finally {
+      setTraduzindoAparencia(false);
+    }
+  }
+
+  async function regerarRetratos() {
     setRetratoEscolhido(null);
+    // Garante que aparencia está traduzida ANTES de gerar URLs
+    await traduzirAparencia();
     setRetratoSeeds([
       Math.floor(Math.random() * 1_000_000),
       Math.floor(Math.random() * 1_000_000),
       Math.floor(Math.random() * 1_000_000),
       Math.floor(Math.random() * 1_000_000),
     ]);
-    // Primeiro slot começa carregando, resto pendente
     setRetratoEstados(["carregando", "pendente", "pendente", "pendente"]);
     setRetratoVersion((v) => v + 1);
   }
@@ -570,7 +598,13 @@ export default function CriacaoPage({
               {retratoSeeds.map((seed, idx) => {
                 const estado = retratoEstados[idx];
                 const url = buildPollinationsUrl(
-                  promptRetrato({ raca, classe, sexo: sexo || undefined, aparencia, variacao: idx }),
+                  promptRetrato({
+                    raca,
+                    classe,
+                    sexo: sexo || undefined,
+                    aparencia: aparenciaEn || aparencia, // usa tradução se disponível
+                    variacao: idx,
+                  }),
                   seed
                 );
                 const escolhido = retratoEscolhido === url && estado === "ok";
@@ -654,6 +688,16 @@ export default function CriacaoPage({
               </button>
               <p className="text-xs text-[var(--color-pedra)] flex-1 self-center italic">
                 ✦ Pollinations.ai · grátis · sequencial 1 por vez (5–15s cada).
+                {aparenciaEn && (
+                  <span className="block text-[var(--color-pergaminho-velho)] mt-1">
+                    Aparência traduzida: <em>{aparenciaEn.slice(0, 80)}{aparenciaEn.length > 80 ? "…" : ""}</em>
+                  </span>
+                )}
+                {traduzindoAparencia && (
+                  <span className="block text-[var(--color-dourado)] mt-1 animate-pulse">
+                    traduzindo aparência…
+                  </span>
+                )}
               </p>
             </div>
 

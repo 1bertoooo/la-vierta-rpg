@@ -21,6 +21,7 @@ import {
   modAtributo,
   hpMaximoNivel1,
   caBase,
+  buildPollinationsUrl,
   promptRetrato,
   CANTRIPS_POR_CLASSE,
   MAGIAS_N1_POR_CLASSE,
@@ -59,8 +60,11 @@ export default function CriacaoPage({
   const [gerandoHistoria, setGerandoHistoria] = useState(false);
 
   const [retratoEscolhido, setRetratoEscolhido] = useState<string | null>(null);
-  const [retratoUrls, setRetratoUrls] = useState<(string | null)[]>([null, null]);
-  const [retratoEstados, setRetratoEstados] = useState<("pendente" | "carregando" | "ok" | "erro")[]>(["pendente", "pendente"]);
+  // 4 seeds aleatórias pra variar prompts. Cada seed → URL Pollinations diferente.
+  const [retratoSeeds, setRetratoSeeds] = useState<number[]>([1, 2, 3, 4]);
+  const [retratoEstados, setRetratoEstados] = useState<("pendente" | "carregando" | "ok" | "erro")[]>(["pendente", "pendente", "pendente", "pendente"]);
+  // Counter incrementa em cada re-roll pra forçar React refazer img
+  const [retratoVersion, setRetratoVersion] = useState(0);
 
   const [erro, setErro] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -120,77 +124,43 @@ export default function CriacaoPage({
     });
   }
 
-  // Gera 1 retrato chamando /api/portrait
-  async function gerarRetratoSlot(idx: number) {
-    if (!raca || !classe) return;
+  // Quando img carrega/falha, libera o próximo slot pendente
+  function onSlotConcluido(idx: number, status: "ok" | "erro") {
+    setRetratoEstados((prev) => {
+      const c = [...prev];
+      c[idx] = status;
+      // Acha o próximo pendente e marca como carregando
+      const proxIdx = c.findIndex((s) => s === "pendente");
+      if (proxIdx >= 0) c[proxIdx] = "carregando";
+      return c;
+    });
+  }
+
+  function regerarRetratos() {
+    setRetratoEscolhido(null);
+    setRetratoSeeds([
+      Math.floor(Math.random() * 1_000_000),
+      Math.floor(Math.random() * 1_000_000),
+      Math.floor(Math.random() * 1_000_000),
+      Math.floor(Math.random() * 1_000_000),
+    ]);
+    // Primeiro slot começa carregando, resto pendente
+    setRetratoEstados(["carregando", "pendente", "pendente", "pendente"]);
+    setRetratoVersion((v) => v + 1);
+  }
+
+  function regerarSlot(idx: number) {
+    setRetratoSeeds((prev) => {
+      const c = [...prev];
+      c[idx] = Math.floor(Math.random() * 1_000_000);
+      return c;
+    });
     setRetratoEstados((prev) => {
       const c = [...prev];
       c[idx] = "carregando";
       return c;
     });
-    setRetratoUrls((prev) => {
-      const c = [...prev];
-      c[idx] = null;
-      return c;
-    });
-
-    const prompt = promptRetrato({
-      raca,
-      classe,
-      sexo: sexo || undefined,
-      aparencia,
-      variacao: idx,
-    });
-
-    try {
-      const r = await fetch("/api/portrait", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, size: "1024x1024", quality: "low" }),
-      });
-      const raw = await r.text();
-      const data = raw ? JSON.parse(raw) : {};
-      if (!r.ok || data.error) throw new Error(data.error || `${r.status}`);
-      let url: string;
-      if (data.b64) {
-        url = `data:${data.mimeType || "image/png"};base64,${data.b64}`;
-      } else if (data.url) {
-        url = data.url;
-      } else {
-        throw new Error("formato inesperado");
-      }
-      setRetratoUrls((prev) => {
-        const c = [...prev];
-        c[idx] = url;
-        return c;
-      });
-      setRetratoEstados((prev) => {
-        const c = [...prev];
-        c[idx] = "ok";
-        return c;
-      });
-    } catch (e) {
-      setRetratoEstados((prev) => {
-        const c = [...prev];
-        c[idx] = "erro";
-        return c;
-      });
-      console.error(`retrato slot ${idx} falhou:`, e);
-    }
-  }
-
-  async function regerarRetratos() {
-    setRetratoEscolhido(null);
-    setRetratoUrls([null, null]);
-    setRetratoEstados(["pendente", "pendente"]);
-    // Sequencial: 1 por vez. ~15s cada → ~30s total pra 2.
-    for (let i = 0; i < 2; i++) {
-      await gerarRetratoSlot(i);
-    }
-  }
-
-  function regerarSlot(idx: number) {
-    gerarRetratoSlot(idx);
+    setRetratoVersion((v) => v + 1);
   }
 
   async function gerarHistoriaIA() {
@@ -596,15 +566,19 @@ export default function CriacaoPage({
               4 retratos forjados pela IA. Escolhe um — ou re-roll por novos.
             </p>
 
-            <div className="grid grid-cols-2 gap-4 mb-6 max-w-2xl mx-auto">
-              {[0, 1].map((idx) => {
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
+              {retratoSeeds.map((seed, idx) => {
                 const estado = retratoEstados[idx];
-                const url = retratoUrls[idx];
-                const escolhido = !!url && retratoEscolhido === url;
+                const url = buildPollinationsUrl(
+                  promptRetrato({ raca, classe, sexo: sexo || undefined, aparencia, variacao: idx }),
+                  seed
+                );
+                const escolhido = retratoEscolhido === url && estado === "ok";
+                const imgKey = `${seed}-${retratoVersion}`;
 
                 return (
                   <div
-                    key={idx}
+                    key={imgKey}
                     className={`relative aspect-square rounded-lg overflow-hidden border-2 transition ${
                       escolhido
                         ? "border-[var(--color-dourado)] ring-2 ring-[var(--color-dourado)]/40"
@@ -614,12 +588,6 @@ export default function CriacaoPage({
                     {estado === "pendente" && (
                       <div className="w-full h-full flex items-center justify-center bg-[var(--color-carvao)]/60">
                         <span className="text-[var(--color-pedra)] text-xs italic">aguardando</span>
-                      </div>
-                    )}
-
-                    {estado === "carregando" && (
-                      <div className="w-full h-full flex items-center justify-center bg-[var(--color-carvao)]/60">
-                        <span className="text-[var(--color-dourado)] text-xs italic animate-pulse">forjando…</span>
                       </div>
                     )}
 
@@ -635,13 +603,26 @@ export default function CriacaoPage({
                       </div>
                     )}
 
-                    {estado === "ok" && url && (
+                    {(estado === "carregando" || estado === "ok") && (
                       <button
-                        onClick={() => setRetratoEscolhido(url)}
+                        onClick={() => estado === "ok" && setRetratoEscolhido(url)}
+                        disabled={estado !== "ok"}
                         className="w-full h-full block relative"
                       >
                         {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={url} alt={`Retrato ${idx + 1}`} className="w-full h-full object-cover" />
+                        <img
+                          key={imgKey}
+                          src={url}
+                          alt={`Retrato ${idx + 1}`}
+                          className={`w-full h-full object-cover ${estado === "carregando" ? "opacity-50" : ""}`}
+                          onLoad={() => onSlotConcluido(idx, "ok")}
+                          onError={() => onSlotConcluido(idx, "erro")}
+                        />
+                        {estado === "carregando" && (
+                          <div className="absolute inset-0 flex items-center justify-center bg-[var(--color-carvao)]/40">
+                            <span className="text-[var(--color-dourado)] text-xs italic animate-pulse">forjando…</span>
+                          </div>
+                        )}
                         {escolhido && (
                           <div className="absolute inset-0 bg-[var(--color-dourado)]/10 flex items-center justify-center">
                             <span className="text-[var(--color-dourado-claro)] text-3xl dourado-glow">✓</span>
@@ -650,14 +631,29 @@ export default function CriacaoPage({
                       </button>
                     )}
 
+                    {estado !== "carregando" && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          regerarSlot(idx);
+                        }}
+                        className="absolute top-1 right-1 w-6 h-6 rounded-full bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-dourado)] text-xs hover:border-[var(--color-dourado)] z-10"
+                        title="Trocar este retrato"
+                      >
+                        ↻
+                      </button>
+                    )}
                   </div>
                 );
               })}
             </div>
 
-            <div className="mb-8">
-              <p className="text-xs text-[var(--color-pedra)] italic">
-                ✦ GPT-image-1 · ~30s pros 2 retratos · usa tua descrição da aparência (privada). Escolhe um — uma vez salvo, fica.
+            <div className="flex flex-wrap gap-3 mb-8 items-center">
+              <button onClick={regerarRetratos} className="btn-selo-secundario text-xs" disabled={step === "salvando"}>
+                ↻ Re-rolar todos
+              </button>
+              <p className="text-xs text-[var(--color-pedra)] flex-1 self-center italic">
+                ✦ Pollinations.ai · grátis · sequencial 1 por vez (5–15s cada).
               </p>
             </div>
 

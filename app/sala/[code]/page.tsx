@@ -117,6 +117,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [ttsPaused, setTtsPaused] = useState(false);
   // Música tocando
   const [musicaTocando, setMusicaTocando] = useState(false);
+  // Mestre escrevendo: aparece entre chegada da resposta e início da narração (sincroniza texto com áudio)
+  const [mestreEscrevendo, setMestreEscrevendo] = useState(false);
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -247,22 +249,41 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             "postgres_changes", { event: "INSERT", schema: "public", table: "combat_log", filter: `session_id=eq.${sId}` },
             (payload) => {
               const ev = payload.new as LogEvent;
-              setLog((prev) => [...prev, ev]);
+              const directives = (ev.payload as { directives?: { roll?: string; music_mood?: string } })?.directives;
+              const isDmNarration = ev.actor_type === "dm" && ev.event_type === "narration";
 
-              // TTS automático em narrações — sincronizado com play_at
-              if (ev.actor_type === "dm" && ev.event_type === "narration" && ttsIsEnabled()) {
+              if (isDmNarration) {
                 const txt = (ev.payload.text as string) || "";
                 const playAt = ev.payload.play_at as number | undefined;
-                ttsSpeak(txt, playAt ? { playAt } : undefined);
-              }
-              const directives = (ev.payload as { directives?: { roll?: string; music_mood?: string } })?.directives;
-              if (ev.actor_type === "dm" && directives?.roll) {
-                setPendingRoll({ raw: directives.roll, rolled: false });
-              }
-              if (ev.actor_type === "dm") {
-                const txt = (ev.payload.text as string) || "";
-                // Sempre aciona música: explícita > detectada > fallback
+                const delay = playAt ? Math.max(0, playAt - Date.now()) : 0;
+
+                // TTS já lida com play_at internamente (preload + setTimeout)
+                if (ttsIsEnabled()) ttsSpeak(txt, playAt ? { playAt } : undefined);
+
+                // Música começa imediatamente — atmosfera vai à frente do texto
                 audioPlayFromNarration({ explicit_mood: directives?.music_mood ?? null, text: txt });
+
+                if (delay > 200) {
+                  // Adia a aparição do texto até o áudio começar — sincroniza voz e leitura
+                  setMestreEscrevendo(true);
+                  setAguardandoIA(false); // transição suave: o loader continua via mestreEscrevendo
+                  setTimeout(() => {
+                    setLog((prev) => [...prev, ev]);
+                    setMestreEscrevendo(false);
+                    if (directives?.roll) setPendingRoll({ raw: directives.roll, rolled: false });
+                  }, delay);
+                } else {
+                  // Sem play_at ou já passou — mostra na hora
+                  setLog((prev) => [...prev, ev]);
+                  setAguardandoIA(false);
+                  if (directives?.roll) setPendingRoll({ raw: directives.roll, rolled: false });
+                }
+              } else {
+                // Eventos não-narração (player, system, npc, dados): aparecem imediatamente
+                setLog((prev) => [...prev, ev]);
+                if (ev.actor_type === "dm" && directives?.roll) {
+                  setPendingRoll({ raw: directives.roll, rolled: false });
+                }
               }
             }
           ).on(
@@ -749,10 +770,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             {log.map((ev) => (
               <LogEntry key={ev.id} ev={ev} myUserId={me?.id} onReplay={replayNarracao} />
             ))}
-            {aguardandoIA && (
-              <div className="text-[var(--color-dourado)] italic text-sm flex items-center gap-2">
-                <span className="brasa">●</span> Mestre tece a próxima cena…
-              </div>
+            {(aguardandoIA || mestreEscrevendo) && (
+              <MestreInvocando estagio={mestreEscrevendo ? "narrando" : "tecendo"} />
             )}
             <div ref={logEndRef} />
           </div>
@@ -1004,6 +1023,75 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Loader místico: roda enquanto o Mestre prepara a próxima cena.
+ * Duas fases:
+ *  - "tecendo": IA processando (quem mandou ação ainda aguardando resposta do server)
+ *  - "narrando": resposta chegou, esperando o áudio começar (sincroniza voz e texto)
+ * Frases alternam a cada ~2s. Anel girando + brasa pulsando + tinta correndo.
+ */
+function MestreInvocando({ estagio }: { estagio: "tecendo" | "narrando" }) {
+  const FRASES_TECENDO = [
+    "O Mestre desenrola o pergaminho…",
+    "Velas tremulam com a próxima cena…",
+    "Os dados sussurram no éter…",
+    "Sombras se reorganizam à mesa…",
+    "O grimório vira a página…",
+    "Tinta de carvão desce no papel…",
+    "A taverna escuta…",
+    "Cordas do destino se cruzam…",
+    "Ecos antigos se aproximam…",
+    "O Mestre consulta o silêncio…",
+    "Runas se alinham…",
+    "A Pandórica ri ao longe…",
+  ];
+  const FRASES_NARRANDO = [
+    "A voz do Mestre se prepara…",
+    "O ar fica denso antes da fala…",
+    "Pergaminho se inclina pra ti…",
+  ];
+  const frases = estagio === "narrando" ? FRASES_NARRANDO : FRASES_TECENDO;
+  const [idx, setIdx] = useState(() => Math.floor(Math.random() * frases.length));
+
+  useEffect(() => {
+    const i = setInterval(() => setIdx((x) => (x + 1) % frases.length), 1900);
+    return () => clearInterval(i);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [estagio]);
+
+  return (
+    <div className="flex items-center gap-3 px-4 py-3 rounded border border-[var(--color-dourado)]/30 bg-gradient-to-r from-[var(--color-carvao)]/60 via-[var(--color-vinho)]/10 to-[var(--color-carvao)]/60 shadow-inner">
+      {/* Selo místico animado: anel girando + brasa pulsando dentro */}
+      <div className="relative w-7 h-7 flex-shrink-0">
+        <div className="absolute inset-0 rounded-full border-2 border-[var(--color-dourado)]/20 border-t-[var(--color-dourado)] border-r-[var(--color-dourado)]/70 animate-spin" style={{ animationDuration: "2.4s" }} />
+        <div className="absolute inset-1.5 rounded-full bg-[var(--color-dourado)]/30 animate-pulse" />
+        <div className="absolute inset-2.5 rounded-full bg-[var(--color-vinho)]/80" />
+      </div>
+      <div className="flex-1 min-w-0">
+        <p
+          key={idx}
+          className="text-[var(--color-dourado)] italic text-sm font-[family-name:var(--font-cinzel)] tracking-wide animate-[fadeIn_0.8s_ease-out]"
+        >
+          {frases[idx]}
+        </p>
+        {/* Linha de tinta correndo */}
+        <div className="mt-1.5 h-px w-full bg-gradient-to-r from-transparent via-[var(--color-dourado)]/50 to-transparent animate-[inkRun_2.4s_ease-in-out_infinite]" />
+      </div>
+      <style jsx>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(2px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes inkRun {
+          0% { transform: scaleX(0.2); transform-origin: left; opacity: 0.2; }
+          50% { transform: scaleX(1); transform-origin: left; opacity: 0.7; }
+          100% { transform: scaleX(0.2); transform-origin: right; opacity: 0.2; }
+        }
+      `}</style>
     </div>
   );
 }

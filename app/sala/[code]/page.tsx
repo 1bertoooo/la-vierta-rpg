@@ -436,6 +436,27 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
         await reloadAll();
 
+        // Auto-start música ao entrar na sala: detecta mood da ÚLTIMA narração
+        // do log (se houver), ou usa tavern como fallback. Pode ser bloqueado
+        // pelo browser autoplay — primeiro click do user libera via audioResumeIfBlocked.
+        if (!cancelled && !audioIsMuted()) {
+          // Pega último evento DM narration
+          if (sId) {
+            const { data: lastNarr } = await sb.from("combat_log")
+              .select("payload")
+              .eq("session_id", sId)
+              .eq("actor_type", "dm")
+              .eq("event_type", "narration")
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            const txt = ((lastNarr as { payload?: { text?: string } } | null)?.payload?.text) || "";
+            audioPlayFromNarration({ explicit_mood: null, text: txt });
+          } else {
+            audioPlayMood("tavern");
+          }
+        }
+
         const ch1 = sb.channel(`sala-${camp.id}`).on(
           "postgres_changes", { event: "*", schema: "public", table: "players", filter: `campaign_id=eq.${camp.id}` }, () => reloadAll()
         ).on(

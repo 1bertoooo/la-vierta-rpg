@@ -207,6 +207,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [vantageMode, setVantageMode] = useState<Vantage>("normal");
   // Pergaminhos (notas + quests + NPCs)
   const [showPergaminhos, setShowPergaminhos] = useState(false);
+  const [showHistorico, setShowHistorico] = useState(false); // Sprint J — round history modal
   const [notas, setNotas] = useState<NotaItem[]>([]);
   const [quests, setQuests] = useState<QuestItem[]>([]);
   const [npcsConhecidos, setNpcsConhecidos] = useState<NpcItem[]>([]);
@@ -445,6 +446,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       if (asideRecebido) setAsideRecebido(null);
       else if (npcRecemConhecido) setNpcRecemConhecido(null);
       else if (showDados) setShowDados(false);
+      else if (showHistorico) setShowHistorico(false);
       else if (showPergaminhos) setShowPergaminhos(false);
       else if (fichaVendo) setFichaVendo(null);
       else if (showAudioPanel) setShowAudioPanel(false);
@@ -452,7 +454,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showDados, showPergaminhos, fichaVendo, showAudioPanel, showResetModal, asideRecebido, npcRecemConhecido]);
+  }, [showDados, showPergaminhos, showHistorico, fichaVendo, showAudioPanel, showResetModal, asideRecebido, npcRecemConhecido]);
 
   // "Tua vez" — toca som + vibration + toast quando turno fica meu
   const turnoAnteriorRef = useRef<string | null>(null);
@@ -1809,6 +1811,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               </span>
             )}
           </button>
+          {/* Sprint J — Histórico de rodadas */}
+          <button onClick={() => setShowHistorico(true)} title="Histórico de rodadas"
+            className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
+            📚
+          </button>
           {/* Painel de áudio unificado */}
           <div className="relative">
             <button
@@ -2038,8 +2045,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             <div ref={logEndRef} />
           </div>
 
-          {/* Input */}
-          <form onSubmit={(e) => e.preventDefault()} className="border-t border-[var(--color-pergaminho-velho)]/20 p-3 flex gap-2 bg-[var(--color-carvao)]/40">
+          {/* Input — Sprint J: empilha em mobile (sm:flex-row) pra MicAcao caber inteiro */}
+          <form onSubmit={(e) => e.preventDefault()} className="border-t border-[var(--color-pergaminho-velho)]/20 p-2 sm:p-3 flex flex-col sm:flex-row gap-2 bg-[var(--color-carvao)]/40">
             {pendingRoll && !pendingRoll.rolled && ehMeuRoll && (
               <button type="button" onClick={() => {
                 // Parse atributo da diretriz (FOR/DES/CON/INT/SAB/CAR ou STR/DEX/etc)
@@ -2122,7 +2129,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               }}
               disabled={aguardandoIA || mestreEscrevendo || !ehMeuTurno || !!pendingRoll || jaAgiNestaRodada}
               placeholder="…ou digita e dá Enter"
-              className="flex-1 min-w-0 px-3 py-2 rounded bg-[var(--color-carvao)]/60 border border-[var(--color-pergaminho-velho)]/30 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] text-sm focus:outline-none focus:border-[var(--color-dourado)]/50 disabled:opacity-50"
+              className="flex-1 min-w-0 px-3 py-3 sm:py-2 min-h-[44px] sm:min-h-0 rounded bg-[var(--color-carvao)]/60 border border-[var(--color-pergaminho-velho)]/30 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] text-sm focus:outline-none focus:border-[var(--color-dourado)]/50 disabled:opacity-50"
             />
           </form>
         </section>
@@ -2261,6 +2268,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           quests={quests}
           npcs={npcsConhecidos}
           onClose={() => setShowPergaminhos(false)}
+        />
+      )}
+
+      {/* Sprint J — Modal histórico de rodadas */}
+      {showHistorico && (
+        <HistoricoRodadasModal
+          log={log}
+          onClose={() => setShowHistorico(false)}
         />
       )}
 
@@ -2875,6 +2890,83 @@ function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: 
  * AsidePrivadoModal — info que SÓ meu personagem viu, outros não veem.
  * Hitchcock: bomba sob a mesa. Aparece com flair de segredo.
  */
+/**
+ * Sprint J — HistoricoRodadasModal: rodadas anteriores formatadas.
+ * Agrupa eventos do log por round (speak.payload.round + narration sequencial).
+ */
+function HistoricoRodadasModal({
+  log,
+  onClose,
+}: {
+  log: { id: string; actor_type: string; event_type: string; payload: Record<string, unknown>; created_at: string }[];
+  onClose: () => void;
+}) {
+  // Agrupa: cada speak/roll com payload.round vai pra um bucket; narration mais
+  // recente após cada bucket é a "resposta da rodada".
+  type Rodada = { round: number; acoes: { nick: string; text: string; type: string }[]; narracao?: string; createdAt: string };
+  const rodadas: Rodada[] = [];
+  const ultimoRoundRef: { [k: string]: Rodada } = {};
+  for (const ev of log) {
+    const round = (ev.payload.round as number) || 0;
+    if (!round) continue;
+    if (ev.event_type === "speak" || ev.event_type === "roll") {
+      let r = ultimoRoundRef[round];
+      if (!r) {
+        r = { round, acoes: [], createdAt: ev.created_at };
+        ultimoRoundRef[round] = r;
+        rodadas.push(r);
+      }
+      const text = (ev.payload.text as string) || JSON.stringify(ev.payload);
+      const nick = (ev.payload.nick as string) || "viajante";
+      r.acoes.push({ nick, text, type: ev.event_type });
+    } else if (ev.event_type === "narration") {
+      const r = ultimoRoundRef[round];
+      if (r && !r.narracao) {
+        r.narracao = (ev.payload.text as string) || "";
+      }
+    }
+  }
+  const ordenadas = [...rodadas].sort((a, b) => b.round - a.round).slice(0, 10);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 px-3 sm:px-6 py-4 sm:py-8" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="bg-[var(--color-carvao)] border border-[var(--color-dourado)] rounded-lg p-4 sm:p-6 max-w-3xl w-full max-h-[85vh] overflow-y-auto">
+        <div className="flex items-baseline justify-between mb-4">
+          <h2 className="text-xl sm:text-2xl text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">📚 Histórico de Rodadas</h2>
+          <button onClick={onClose} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xs uppercase tracking-widest">Fechar</button>
+        </div>
+        {ordenadas.length === 0 ? (
+          <p className="text-[var(--color-pergaminho-velho)] italic text-sm">Nenhuma rodada registrada ainda.</p>
+        ) : (
+          <div className="space-y-4">
+            {ordenadas.map((r) => (
+              <div key={r.round} className="border-l-2 border-[var(--color-dourado)]/40 pl-3 sm:pl-4 py-2">
+                <p className="text-xs uppercase tracking-widest text-[var(--color-dourado)] mb-2">Rodada {r.round}</p>
+                <div className="space-y-1.5 mb-3">
+                  {r.acoes.map((a, i) => (
+                    <p key={i} className="text-sm text-[var(--color-pergaminho)]">
+                      <span className="text-[var(--color-dourado-claro)] font-[family-name:var(--font-cinzel)]">{a.nick}</span>
+                      {a.type === "roll" ? <span className="text-[var(--color-sangue)] ml-1">🎲</span> : null}
+                      <span className="text-[var(--color-pergaminho-velho)]">: </span>
+                      {a.text}
+                    </p>
+                  ))}
+                </div>
+                {r.narracao && (
+                  <div className="bg-[var(--color-vinho)]/15 border border-[var(--color-vinho)]/30 rounded p-2 sm:p-3 text-xs sm:text-sm text-[var(--color-pergaminho)] italic">
+                    {r.narracao.replace(/\[[^\]]+\]/g, "").slice(0, 400)}
+                    {r.narracao.length > 400 ? "…" : ""}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AsidePrivadoModal({ text, onClose }: { text: string; onClose: () => void }) {
   useEffect(() => {
     const t = setTimeout(onClose, 12000);

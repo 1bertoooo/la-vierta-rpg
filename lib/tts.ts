@@ -1,60 +1,74 @@
 /**
  * TTS humano via OpenAI:
  * - Narrador (Mestre): onyx — masculina grave, épica
- * - NPCs: voz escolhida por hash do nome (echo, fable, alloy, nova, shimmer)
- * - Falas em "Nome: ..." são detectadas e tocadas com a voz do NPC
- *
- * Fallback: Web Speech API se /api/tts falhar.
+ * - NPCs: voz + speed configuráveis por nome
+ * - Bruna a Pandórica: nova + speed 1.18 (aguda, rápida — meiga-irritante)
  */
 
 type OpenAIVoice = "onyx" | "echo" | "fable" | "alloy" | "nova" | "shimmer";
 
-const NARRADOR_VOICE: OpenAIVoice = "onyx";
+type VoiceConfig = { voice: OpenAIVoice; speed?: number };
 
-// Vozes diferentes por NPC, escolhidas por hash do nome
-const NPC_VOICES: OpenAIVoice[] = ["echo", "fable", "alloy", "nova", "shimmer"];
+const NARRADOR_VOICE: VoiceConfig = { voice: "onyx", speed: 0.95 };
 
-// NPCs específicos com voz fixa pra consistência
-const NPC_VOICE_OVERRIDE: Record<string, OpenAIVoice> = {
-  "anderson": "fable",
-  "mestre anderson": "fable",
-  "sergio": "echo",
-  "seu sergio": "echo",
-  "seu sérgio": "echo",
-  "walber": "alloy",
-  "bia": "nova",
-  "bia, a triste": "nova",
-  "diego": "echo",
-  "diego das sombras": "echo",
-  "letícia": "shimmer",
-  "leticia": "shimmer",
-  "punheticia": "shimmer",
-  "punhetícia": "shimmer",
-  "bruna": "shimmer",
-  "bruna a pandórica": "shimmer",
-  "bruna a pandorica": "shimmer",
-  "victor": "echo",
-  "joseph pussy": "alloy",
-  "joseph pussies": "alloy",
+const NPC_VOICES: VoiceConfig[] = [
+  { voice: "echo", speed: 0.95 },
+  { voice: "fable", speed: 0.95 },
+  { voice: "alloy", speed: 0.95 },
+  { voice: "nova", speed: 0.95 },
+  { voice: "shimmer", speed: 0.95 },
+];
+
+// NPCs com voz fixa pra consistência narrativa
+const NPC_VOICE_OVERRIDE: Record<string, VoiceConfig> = {
+  // Bruna — "fina, meiga, irritante" — aguda + rápida
+  "bruna": { voice: "nova", speed: 1.2 },
+  "bruna a pandórica": { voice: "nova", speed: 1.2 },
+  "bruna a pandorica": { voice: "nova", speed: 1.2 },
+  "pandórica": { voice: "nova", speed: 1.2 },
+  "pandorica": { voice: "nova", speed: 1.2 },
+  "bruna lavierta": { voice: "nova", speed: 1.2 },
+
+  // Mestres / aliados
+  "anderson": { voice: "fable", speed: 0.92 },
+  "mestre anderson": { voice: "fable", speed: 0.92 },
+  "padrinho anderson": { voice: "fable", speed: 0.92 },
+  "sergio": { voice: "echo", speed: 0.88 },
+  "seu sergio": { voice: "echo", speed: 0.88 },
+  "seu sérgio": { voice: "echo", speed: 0.88 },
+  "walber": { voice: "alloy", speed: 0.95 },
+  "bia": { voice: "shimmer", speed: 1.0 },
+  "bia, a triste": { voice: "shimmer", speed: 0.92 },
+
+  // Vilões / antagonistas
+  "diego": { voice: "echo", speed: 1.05 },
+  "diego das sombras": { voice: "echo", speed: 1.05 },
+  "victor": { voice: "echo", speed: 0.95 },
+  "victor de chifrinho": { voice: "echo", speed: 0.95 },
+  "letícia": { voice: "shimmer", speed: 1.1 },
+  "leticia": { voice: "shimmer", speed: 1.1 },
+  "punheticia": { voice: "shimmer", speed: 1.1 },
+  "punhetícia": { voice: "shimmer", speed: 1.1 },
+  "janaína": { voice: "shimmer", speed: 1.05 },
+  "janaina": { voice: "shimmer", speed: 1.05 },
+  "joseph pussy": { voice: "alloy", speed: 0.95 },
+  "joseph pussies": { voice: "alloy", speed: 0.95 },
 };
 
-function vozPraNpc(nome: string): OpenAIVoice {
+function vozPraNpc(nome: string): VoiceConfig {
   const key = nome.trim().toLowerCase();
   if (NPC_VOICE_OVERRIDE[key]) return NPC_VOICE_OVERRIDE[key];
-  // Hash simples
   let h = 0;
   for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
   return NPC_VOICES[h % NPC_VOICES.length];
 }
 
-// Estado interno
 let audioEl: HTMLAudioElement | null = null;
 let speakingChunkIdx = 0;
-let chunks: { text: string; voice: OpenAIVoice }[] = [];
+let chunks: { text: string; voice: OpenAIVoice; speed: number }[] = [];
 let stopped = false;
 
 const TTS_KEY = "lavierta:tts:enabled";
-// Cache de áudios já gerados (text+voice → blob URL)
 const audioCache: Map<string, string> = new Map();
 
 export function ttsIsEnabled(): boolean {
@@ -77,25 +91,20 @@ export function ttsStop() {
   }
   chunks = [];
   speakingChunkIdx = 0;
-
   if (typeof window !== "undefined" && window.speechSynthesis) {
     window.speechSynthesis.cancel();
   }
 }
 
 export function ttsPause() {
-  if (audioEl && !audioEl.paused) {
-    audioEl.pause();
-  }
+  if (audioEl && !audioEl.paused) audioEl.pause();
   if (typeof window !== "undefined" && window.speechSynthesis) {
     window.speechSynthesis.pause();
   }
 }
 
 export function ttsResume() {
-  if (audioEl && audioEl.paused) {
-    audioEl.play().catch(() => {});
-  }
+  if (audioEl && audioEl.paused) audioEl.play().catch(() => {});
   if (typeof window !== "undefined" && window.speechSynthesis) {
     window.speechSynthesis.resume();
   }
@@ -110,64 +119,51 @@ export function ttsIsPaused(): boolean {
 }
 
 /**
- * Detecta falas em "Nome: \"...\"" ou "Nome diz: ..." e divide o texto em chunks com vozes.
- * O resto vai pro Narrador.
+ * Detecta falas em "Nome: \"...\"" e divide o texto em chunks com vozes.
  */
-function dividirEmChunks(texto: string): { text: string; voice: OpenAIVoice }[] {
-  const result: { text: string; voice: OpenAIVoice }[] = [];
-
-  // Regex: captura "Nome: "fala"" ou "Nome solta seu "fala""
-  // Padrão: 1+ palavras com inicial maiúscula seguidas de : "..." OU "..."
+function dividirEmChunks(texto: string): { text: string; voice: OpenAIVoice; speed: number }[] {
+  const result: { text: string; voice: OpenAIVoice; speed: number }[] = [];
   const re = /([A-ZÁÉÍÓÚÂÊÔÃÕÇ][a-záéíóúâêôãõç]+(?:\s+[a-záéíóúâêôãõç]+)*)(?:\s*[:,]?\s*)["“"]([^"”"]+)["”"]/g;
 
   let lastIdx = 0;
   let match: RegExpExecArray | null;
   while ((match = re.exec(texto)) !== null) {
-    // Texto antes do match → narrador
     if (match.index > lastIdx) {
       const before = texto.slice(lastIdx, match.index).trim();
-      if (before) result.push({ text: before, voice: NARRADOR_VOICE });
+      if (before) result.push({ text: before, voice: NARRADOR_VOICE.voice, speed: NARRADOR_VOICE.speed || 0.95 });
     }
-    // O match em si: pode incluir o nome+verbo (ex: "Sérgio diz:") + a fala
     const nome = match[1];
     const fala = match[2];
-
-    // Coloca o "Nome:" no narrador, e a fala no NPC
-    const introMatch = match[0].slice(0, match[0].indexOf(fala) - 1);
-    if (introMatch.trim()) {
-      result.push({ text: introMatch.trim(), voice: NARRADOR_VOICE });
+    const intro = match[0].slice(0, match[0].indexOf(fala) - 1);
+    if (intro.trim()) {
+      result.push({ text: intro.trim(), voice: NARRADOR_VOICE.voice, speed: NARRADOR_VOICE.speed || 0.95 });
     }
-    result.push({ text: fala.trim(), voice: vozPraNpc(nome) });
-
+    const cfg = vozPraNpc(nome);
+    result.push({ text: fala.trim(), voice: cfg.voice, speed: cfg.speed || 0.95 });
     lastIdx = match.index + match[0].length;
   }
-
-  // Resto
   if (lastIdx < texto.length) {
     const rest = texto.slice(lastIdx).trim();
-    if (rest) result.push({ text: rest, voice: NARRADOR_VOICE });
+    if (rest) result.push({ text: rest, voice: NARRADOR_VOICE.voice, speed: NARRADOR_VOICE.speed || 0.95 });
   }
-
   if (result.length === 0) {
-    result.push({ text: texto, voice: NARRADOR_VOICE });
+    result.push({ text: texto, voice: NARRADOR_VOICE.voice, speed: NARRADOR_VOICE.speed || 0.95 });
   }
-
   return result;
 }
 
-async function fetchAudio(text: string, voice: OpenAIVoice): Promise<string> {
-  const cacheKey = `${voice}:${text}`;
+async function fetchAudio(text: string, voice: OpenAIVoice, speed: number): Promise<string> {
+  const cacheKey = `${voice}:${speed}:${text}`;
   const cached = audioCache.get(cacheKey);
   if (cached) return cached;
 
   const r = await fetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, voice, speed: 0.95 }),
+    body: JSON.stringify({ text, voice, speed }),
   });
   if (!r.ok) throw new Error(`tts ${r.status}`);
 
-  // Pode ser JSON ({url, cached}) OU stream de áudio (fallback)
   const ct = r.headers.get("content-type") || "";
   if (ct.includes("application/json")) {
     const data = await r.json();
@@ -177,7 +173,6 @@ async function fetchAudio(text: string, voice: OpenAIVoice): Promise<string> {
     }
     throw new Error(data.error || "sem url");
   }
-  // Fallback inline
   const blob = await r.blob();
   const url = URL.createObjectURL(blob);
   audioCache.set(cacheKey, url);
@@ -190,34 +185,25 @@ async function tocarChunkAtual() {
 
   const chunk = chunks[speakingChunkIdx];
   try {
-    const url = await fetchAudio(chunk.text, chunk.voice);
+    const url = await fetchAudio(chunk.text, chunk.voice, chunk.speed);
     if (stopped) return;
-
     audioEl = new Audio(url);
     audioEl.onended = () => {
       speakingChunkIdx++;
       tocarChunkAtual();
     };
     audioEl.onerror = () => {
-      // Pula esse chunk e tenta o próximo
       speakingChunkIdx++;
       tocarChunkAtual();
     };
     await audioEl.play();
   } catch {
-    // Fallback Web Speech pro chunk
     if (typeof window !== "undefined" && window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(chunk.text);
       u.lang = "pt-BR";
-      u.rate = 0.95;
-      u.onend = () => {
-        speakingChunkIdx++;
-        tocarChunkAtual();
-      };
-      u.onerror = () => {
-        speakingChunkIdx++;
-        tocarChunkAtual();
-      };
+      u.rate = chunk.speed;
+      u.onend = () => { speakingChunkIdx++; tocarChunkAtual(); };
+      u.onerror = () => { speakingChunkIdx++; tocarChunkAtual(); };
       window.speechSynthesis.speak(u);
     } else {
       speakingChunkIdx++;
@@ -226,34 +212,23 @@ async function tocarChunkAtual() {
   }
 }
 
-/**
- * Pre-carrega todos os chunks no cache antes de tocar.
- * Quando playAt chega, todos clientes têm o áudio pronto e tocam ao mesmo tempo.
- */
 async function preloadChunks(text: string) {
   const cs = dividirEmChunks(text);
-  await Promise.all(cs.map((c) => fetchAudio(c.text, c.voice).catch(() => null)));
+  await Promise.all(cs.map((c) => fetchAudio(c.text, c.voice, c.speed).catch(() => null)));
 }
 
 export function ttsSpeak(text: string, opts?: { force?: boolean; playAt?: number }) {
   if (typeof window === "undefined") return;
   if (!text.trim()) return;
 
-  if (opts?.force) {
-    ttsStop();
-  }
-  if (audioEl && !audioEl.paused && !opts?.playAt) {
-    return;
-  }
+  if (opts?.force) ttsStop();
+  if (audioEl && !audioEl.paused && !opts?.playAt) return;
 
   stopped = false;
   chunks = dividirEmChunks(text);
   speakingChunkIdx = 0;
 
-  // Sincronização: se playAt foi setado, pre-carrega tudo e dispara no momento exato
   if (opts?.playAt) {
-    const wait = Math.max(0, opts.playAt - Date.now());
-    // Pre-carrega áudio em paralelo durante a espera
     preloadChunks(text).then(() => {
       const remaining = Math.max(0, opts.playAt! - Date.now());
       setTimeout(() => {

@@ -166,6 +166,18 @@ async function fetchAudio(text: string, voice: OpenAIVoice): Promise<string> {
     body: JSON.stringify({ text, voice, speed: 0.95 }),
   });
   if (!r.ok) throw new Error(`tts ${r.status}`);
+
+  // Pode ser JSON ({url, cached}) OU stream de áudio (fallback)
+  const ct = r.headers.get("content-type") || "";
+  if (ct.includes("application/json")) {
+    const data = await r.json();
+    if (data.url) {
+      audioCache.set(cacheKey, data.url);
+      return data.url;
+    }
+    throw new Error(data.error || "sem url");
+  }
+  // Fallback inline
   const blob = await r.blob();
   const url = URL.createObjectURL(blob);
   audioCache.set(cacheKey, url);

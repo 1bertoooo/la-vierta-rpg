@@ -137,3 +137,118 @@ h1, h2, h3, h4, h5, h6 {
 ::-webkit-scrollbar-track { background: #1a1612; }
 ::-webkit-scrollbar-thumb { background: #722f37; border-radius: 5px; }
 ::-webkit-scrollbar-thumb:hover { background: #a52a2a; }
+
+/* ============================================
+   Ambiente: tempo do dia + clima (overlays sutis)
+   Aplicados via classe na <main> da sala.
+   ============================================ */
+
+/* Chuva: faixa diagonal animada, sutil */
+.ambiente-chuva::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  background-image:
+    repeating-linear-gradient(
+      105deg,
+      transparent 0,
+      transparent 2px,
+      rgba(160, 200, 230, 0.08) 2px,
+      rgba(160, 200, 230, 0.08) 3px,
+      transparent 3px,
+      transparent 9px
+    );
+  animation: chuva-cair 0.8s linear infinite;
+  opacity: 0.6;
+}
+@keyframes chuva-cair {
+  from { background-position: 0 0; }
+  to   { background-position: -10px 30px; }
+}
+
+/* Tempestade: chuva mais densa + flashes ocasionais */
+.ambiente-tempestade::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  background-image:
+    repeating-linear-gradient(
+      100deg,
+      transparent 0,
+      transparent 1px,
+      rgba(160, 200, 230, 0.15) 1px,
+      rgba(160, 200, 230, 0.15) 2px,
+      transparent 2px,
+      transparent 6px
+    );
+  animation: chuva-cair 0.5s linear infinite;
+  opacity: 0.8;
+}
+.ambiente-tempestade::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  background: rgba(255, 255, 255, 0);
+  animation: relampago 11s steps(1, end) infinite;
+}
+@keyframes relampago {
+  0%, 96%, 99.5% { background: rgba(255, 255, 255, 0); }
+  96.5% { background: rgba(255, 255, 255, 0.18); }
+  97%   { background: rgba(255, 255, 255, 0); }
+  97.3% { background: rgba(255, 255, 255, 0.25); }
+  98%   { background: rgba(255, 255, 255, 0); }
+}
+
+/* Névoa: gradiente cinza-azulado em movimento sutil */
+.ambiente-nevoa::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  background:
+    radial-gradient(ellipse at 20% 30%, rgba(180, 200, 220, 0.18) 0%, transparent 40%),
+    radial-gradient(ellipse at 70% 60%, rgba(180, 200, 220, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse at 40% 80%, rgba(180, 200, 220, 0.15) 0%, transparent 45%);
+  animation: nevoa-mover 25s ease-in-out infinite alternate;
+}
+@keyframes nevoa-mover {
+  from { transform: translate(0, 0); }
+  to   { transform: translate(20px, -10px); }
+}
+
+/* Neve: pontos brancos caindo */
+.ambiente-neve::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+  background-image:
+    radial-gradient(circle, rgba(255, 255, 255, 0.7) 1px, transparent 1.5px),
+    radial-gradient(circle, rgba(255, 255, 255, 0.5) 1px, transparent 1.5px);
+  background-size: 50px 50px, 80px 80px;
+  background-position: 0 0, 25px 40px;
+  animation: neve-cair 12s linear infinite;
+}
+@keyframes neve-cair {
+  from { background-position: 0 -50px, 25px -50px; }
+  to   { background-position: 0 100vh, 25px 100vh; }
+}
+
+/* Respeitar prefers-reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .ambiente-chuva::before,
+  .ambiente-tempestade::before,
+  .ambiente-tempestade::after,
+  .ambiente-nevoa::before,
+  .ambiente-neve::before {
+    animation: none;
+  }
+}

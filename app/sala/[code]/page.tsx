@@ -72,6 +72,9 @@ type Character = {
   conditions?: { name: string; source?: string; expires_at?: string }[];
   xp?: number;
   inspiration?: boolean;
+  hit_dice_current?: number | null;
+  exhaustion?: number;
+  speed?: number;
 };
 
 type Campaign = {
@@ -165,6 +168,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [audioMuted, setAudioMuted] = useState(true);
   const [audioVol, setAudioVol] = useState(0.35);
   const [showFicha, setShowFicha] = useState(false);
+  const [showLiga, setShowLiga] = useState(false);
   const [showDados, setShowDados] = useState(false);
   const [showAudioPanel, setShowAudioPanel] = useState(false);
   const [pendingRoll, setPendingRoll] = useState<{ raw: string; rolled: boolean } | null>(null);
@@ -197,6 +201,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [emCombate, setEmCombate] = useState(false);
   // Pendência de ataque do mestre [ATTACK: ...] — botão pra rolar
   const [pendingAttack, setPendingAttack] = useState<{ alvo: string; dice: string; ac?: number } | null>(null);
+  // NPC recém-encontrado — modal épico com flair
+  const [npcRecemConhecido, setNpcRecemConhecido] = useState<NpcItem | null>(null);
+  // Tempo do dia e clima
+  const [timeOfDay, setTimeOfDay] = useState<string>("day");
+  const [weather, setWeather] = useState<string>("clear");
   // Anti-flicker / cleanup do timeout do mestre
   const mestreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Channel pra broadcast "Mestre invocando" entre clients (não-DB, mais rápido)
@@ -374,11 +383,13 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             const { data: events } = await sb.from("combat_log").select("*").eq("session_id", sId as string).order("created_at", { ascending: true }).limit(200);
             if (!cancelled) setLog((events as LogEvent[]) || []);
 
-            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat").eq("id", sId).maybeSingle();
+            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather").eq("id", sId).maybeSingle();
             if (!cancelled && sess) {
-              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean };
+              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string };
               setCurrentTurnUserId(s.current_turn_player_id);
               setEmCombate(!!s.in_combat);
+              if (s.time_of_day) setTimeOfDay(s.time_of_day);
+              if (s.weather) setWeather(s.weather);
             }
 
             // Iniciativa do combate atual (resilient se tabela ainda não migrada)
@@ -420,9 +431,15 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           }
         ).on(
           "postgres_changes", { event: "*", schema: "public", table: "npc_journal", filter: `campaign_id=eq.${camp.id}` },
-          async () => {
+          async (payload) => {
             const { data } = await sb.from("npc_journal").select("*").eq("campaign_id", camp.id).order("last_seen_at", { ascending: false, nullsFirst: false });
             if (!cancelled) setNpcsConhecidos((data as NpcItem[]) || []);
+            // Primeiro encontro: payload.eventType === 'INSERT' → mostra card épico
+            if (payload.eventType === "INSERT" && payload.new) {
+              const novo = payload.new as NpcItem;
+              if (!cancelled) setNpcRecemConhecido(novo);
+              sfxPlay("bell");
+            }
           }
         ).subscribe();
         unsubs.push(() => sb.removeChannel(ch1));
@@ -491,9 +508,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           ).on(
             "postgres_changes", { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sId}` },
             (payload) => {
-              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean };
+              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string };
               setCurrentTurnUserId(sess.current_turn_player_id);
               if (typeof sess.in_combat === "boolean") setEmCombate(sess.in_combat);
+              if (sess.time_of_day) setTimeOfDay(sess.time_of_day);
+              if (sess.weather) setWeather(sess.weather);
             }
           ).on(
             "postgres_changes", { event: "*", schema: "public", table: "combat_initiative", filter: `session_id=eq.${sId}` },
@@ -1113,13 +1132,34 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const isAdmin = me?.role === "admin";
   const ehMeuTurno = !currentTurnUserId || currentTurnUserId === me?.id;
 
+  // Overlay visual de tempo/clima (não-intrusivo, fica acima do conteúdo)
+  const ambienteOverlay = (() => {
+    const overlays: string[] = [];
+    if (timeOfDay === "night") overlays.push("bg-blue-950/30");
+    else if (timeOfDay === "dusk") overlays.push("bg-orange-900/15");
+    else if (timeOfDay === "dawn") overlays.push("bg-rose-900/10");
+    if (weather === "rain") overlays.push("ambiente-chuva");
+    else if (weather === "storm") overlays.push("ambiente-tempestade");
+    else if (weather === "fog") overlays.push("ambiente-nevoa");
+    else if (weather === "snow") overlays.push("ambiente-neve");
+    return overlays.join(" ");
+  })();
+
   return (
-    <main className="min-h-screen pergaminho-texture flex flex-col">
+    <main className={`min-h-screen pergaminho-texture flex flex-col relative ${ambienteOverlay}`}>
+      {/* Camada visual ambiente (overlay) */}
+      {ambienteOverlay && (
+        <div className="pointer-events-none fixed inset-0 z-[5] mix-blend-multiply transition-opacity duration-1000" />
+      )}
       <header className="border-b border-[var(--color-pergaminho-velho)]/20 px-3 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2 sm:gap-3 flex-wrap">
         <Link href="/" className="text-[10px] sm:text-xs uppercase tracking-[0.2em] sm:tracking-[0.3em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">← <span className="hidden sm:inline">La Vierta</span></Link>
         <div className="flex-1 text-center min-w-0 hidden sm:block">
           <span className="text-xs uppercase tracking-widest text-[var(--color-pedra)] truncate block">
             {campaign?.name} · Cap. {campaign?.current_chapter}
+            <span className="ml-3 text-[var(--color-pergaminho-velho)]" title={`${timeOfDay} · ${weather}`}>
+              {timeOfDay === "night" ? "🌙" : timeOfDay === "dusk" ? "🌅" : timeOfDay === "dawn" ? "🌄" : "☀"}
+              {weather === "rain" ? " ☔" : weather === "storm" ? " ⛈" : weather === "snow" ? " ❄" : weather === "fog" ? " 🌫" : ""}
+            </span>
           </span>
         </div>
         <div className="flex items-center gap-2 sm:gap-3 text-sm">
@@ -1177,8 +1217,16 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
       <div className="flex-1 flex flex-col lg:flex-row max-w-7xl w-full mx-auto">
         {/* Liga */}
-        <aside className="lg:w-56 border-b lg:border-b-0 lg:border-r border-[var(--color-pergaminho-velho)]/20 p-4">
-          <h2 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3">Liga</h2>
+        <aside className="lg:w-56 border-b lg:border-b-0 lg:border-r border-[var(--color-pergaminho-velho)]/20 p-3 sm:p-4">
+          <button
+            onClick={() => setShowLiga((s) => !s)}
+            className="lg:hidden w-full flex items-baseline justify-between text-xs uppercase tracking-widest text-[var(--color-dourado)] mb-2"
+          >
+            <span>Liga ({players.filter((p) => p.last_seen_at && Date.now() - new Date(p.last_seen_at).getTime() < 60000).length} online)</span>
+            <span>{showLiga ? "▲" : "▼"}</span>
+          </button>
+          <div className={`${showLiga ? "block" : "hidden"} lg:block`}>
+          <h2 className="hidden lg:block text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3">Liga</h2>
           <ul className="space-y-2">
             {players.map((p) => {
               const ch = characters[p.user_id || ""];
@@ -1239,6 +1287,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               </button>
             </div>
           )}
+          </div>
         </aside>
 
         {/* Log */}
@@ -1429,6 +1478,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             }
           `}</style>
         </div>
+      )}
+
+      {/* Modal NPC recém-conhecido — flair épico no primeiro encontro */}
+      {npcRecemConhecido && (
+        <NpcEncontroModal npc={npcRecemConhecido} onClose={() => setNpcRecemConhecido(null)} />
       )}
 
       {/* Modal Pergaminhos: notas + quests + NPCs */}
@@ -1654,6 +1708,54 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * NpcEncontroModal — Card épico que aparece no primeiro encontro com um NPC.
+ * Anima entrada, mostra retrato (se houver), bordão e aparência.
+ * Auto-fecha após 8s ou click fora.
+ */
+function NpcEncontroModal({ npc, onClose }: { npc: NpcItem; onClose: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 8000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/70 backdrop-blur-sm px-6 animate-[npcFadeIn_0.5s_ease-out]" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative bg-[var(--color-carvao)] border-2 border-[var(--color-dourado)] rounded-lg p-6 max-w-sm w-full shadow-2xl animate-[npcEntrada_0.7s_ease-out]"
+        style={{ boxShadow: "0 0 60px rgba(212, 175, 55, 0.4), 0 0 120px rgba(110, 26, 26, 0.3)" }}
+      >
+        <button onClick={onClose} className="absolute top-2 right-3 text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-2xl leading-none">×</button>
+        <p className="text-[10px] uppercase tracking-[0.4em] text-[var(--color-pergaminho-velho)] mb-1 text-center">Tu encontras…</p>
+        <h2 className="text-3xl text-center text-[var(--color-dourado-claro)] dourado-glow font-[family-name:var(--font-cinzel-decorative)] mb-3">{npc.name}</h2>
+        <div className="w-16 h-px mx-auto bg-gradient-to-r from-transparent via-[var(--color-dourado)] to-transparent mb-4" />
+        {npc.appearance && (
+          <p className="text-sm text-[var(--color-pergaminho)] italic text-center mb-3 leading-relaxed">{npc.appearance}</p>
+        )}
+        {npc.bordao && (
+          <p className="text-base text-[var(--color-dourado)] text-center font-[family-name:var(--font-cinzel)] mb-2">&ldquo;{npc.bordao}&rdquo;</p>
+        )}
+        {npc.faction && (
+          <p className="text-[10px] uppercase tracking-widest text-[var(--color-vinho)] text-center">{npc.faction}</p>
+        )}
+      </div>
+      <style jsx>{`
+        @keyframes npcFadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes npcEntrada {
+          0%   { opacity: 0; transform: scale(0.7) rotate(-3deg); }
+          50%  { opacity: 1; transform: scale(1.05) rotate(0deg); }
+          75%  { transform: scale(0.98) rotate(0deg); }
+          100% { transform: scale(1) rotate(0deg); }
+        }
+      `}</style>
     </div>
   );
 }

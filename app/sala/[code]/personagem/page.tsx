@@ -133,9 +133,7 @@ export default function CriacaoPage({
         user_id: me.id,
         name: nome.trim(),
         race: raca,
-        race_key: raca,
         class: classe,
-        class_key: classe,
         level: 1,
         for_attr: atributosFinais.for,
         des_attr: atributosFinais.des,
@@ -146,9 +144,10 @@ export default function CriacaoPage({
         hp_max: hpMaximoNivel1(classe, atributosFinais.con),
         hp_current: hpMaximoNivel1(classe, atributosFinais.con),
         ac: caBase(atributosFinais.des),
-        background: background.trim() || null,
+        background: genero
+          ? `${genero}\n\n${background.trim()}`.trim()
+          : background.trim() || null,
         portrait_url: retratoEscolhido,
-        genero: genero || null,
         spells: [...cantrips, ...magiasN1.slice(0, 2)],
         features: classeInfo.features,
         inventory: [],

@@ -31,8 +31,8 @@ type Character = {
   id: string;
   user_id: string;
   name: string;
-  race_key: string;
-  class_key: string;
+  race: string;
+  class: string;
   level: number;
   for_attr: number;
   des_attr: number;
@@ -181,11 +181,43 @@ export default function SalaPage({
         }
 
         // Sessão atual (cria se não existe)
-        const { data: sId } = await sb.rpc("get_or_create_current_session", {
-          p_campaign_id: camp.id,
-        });
+        let sId: string | null = null;
+        const { data: existingSession } = await sb
+          .from("sessions")
+          .select("id")
+          .eq("campaign_id", camp.id)
+          .is("ended_at", null)
+          .order("started_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+        if (existingSession) {
+          sId = (existingSession as { id: string }).id;
+        } else {
+          // Cria nova sessão (só admin pode escrever em sessions, então tenta e ignora se falhar)
+          const { data: newSess, error: sessErr } = await sb
+            .from("sessions")
+            .insert({
+              campaign_id: camp.id,
+              session_number: 1,
+              music_mood: "tavern",
+            })
+            .select("id")
+            .maybeSingle();
+          if (newSess) sId = (newSess as { id: string }).id;
+          else if (sessErr) {
+            // Não-admin: provavelmente tem sessão mas não tá vendo. Tenta de novo sem filtro.
+            const { data: anySession } = await sb
+              .from("sessions")
+              .select("id")
+              .eq("campaign_id", camp.id)
+              .order("started_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+            if (anySession) sId = (anySession as { id: string }).id;
+          }
+        }
         if (cancelled) return;
-        setSessionId(sId as string);
+        setSessionId(sId);
 
         const reloadAll = async () => {
           const { data: list } = await sb
@@ -348,8 +380,8 @@ export default function SalaPage({
         character: ch
           ? {
               name: ch.name,
-              race: RACAS.find((r) => r.key === ch.race_key)?.nome || ch.race_key,
-              class: CLASSES.find((c) => c.key === ch.class_key)?.nome || ch.class_key,
+              race: RACAS.find((r) => r.key === ch.race)?.nome || ch.race,
+              class: CLASSES.find((c) => c.key === ch.class)?.nome || ch.class,
               hp: ch.hp_current,
               hp_max: ch.hp_max,
             }
@@ -659,7 +691,7 @@ export default function SalaPage({
                     </div>
                     {ch && (
                       <div className="text-[10px] text-[var(--color-pergaminho-velho)] uppercase tracking-wider">
-                        {RACAS.find((r) => r.key === ch.race_key)?.nome.split(" ")[0]} · {CLASSES.find((c) => c.key === ch.class_key)?.nome}
+                        {RACAS.find((r) => r.key === ch.race)?.nome.split(" ")[0]} · {CLASSES.find((c) => c.key === ch.class)?.nome}
                       </div>
                     )}
                   </div>
@@ -901,8 +933,8 @@ function LogEntry({
 }
 
 function Ficha({ char }: { char: Character }) {
-  const raca = RACAS.find((r) => r.key === char.race_key);
-  const classe = CLASSES.find((c) => c.key === char.class_key);
+  const raca = RACAS.find((r) => r.key === char.race);
+  const classe = CLASSES.find((c) => c.key === char.class);
   return (
     <div className="space-y-4">
       {char.portrait_url && (

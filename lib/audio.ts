@@ -80,8 +80,13 @@ export function detectMoodFromText(text: string): Mood | null {
 
 let currentAudio: HTMLAudioElement | null = null;
 let currentMood: Mood | null = null;
-// Default baixo — música é ambiente, não primeiro plano. Player ajusta no painel.
+// Default baixo — música é ambiente, não primeiro plano.
+// UI exibe como 50% (escala 0-100). Real value: 0.18 = 50% do teto 0.36.
 let masterVolume = 0.18;
+// Mapeamento: slider UI 0..1 → volume real 0..0.36 (música é ambiente, não primeiro plano)
+export const VOLUME_CEILING = 0.36;
+export function uiToRealVolume(ui: number): number { return Math.max(0, Math.min(1, ui)) * VOLUME_CEILING; }
+export function realToUiVolume(real: number): number { return Math.max(0, Math.min(1, real / VOLUME_CEILING)); }
 
 const VOL_KEY = "lavierta:audio:volume";
 const MUTED_KEY = "lavierta:audio:muted";

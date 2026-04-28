@@ -24,6 +24,8 @@ import {
   sfxPlay,
   sfxSetVolume,
   sfxGetVolume,
+  uiToRealVolume,
+  realToUiVolume,
   type SFX,
 } from "@/lib/audio";
 import { parseDirectives, stripDirectives, type Directive } from "@/lib/directives";
@@ -166,7 +168,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   const [ttsOn, setTtsOn] = useState(false);
   const [audioMuted, setAudioMuted] = useState(true);
-  const [audioVol, setAudioVol] = useState(0.18);
+  // audioVol é UI (0..1, 50% por default = 0.5)
+  const [audioVol, setAudioVol] = useState(0.5);
   const [showFicha, setShowFicha] = useState(false);
   const [showLiga, setShowLiga] = useState(false);
   const [showDados, setShowDados] = useState(false);
@@ -240,7 +243,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     audioInit();
     sfxInit();
     setAudioMuted(audioIsMuted());
-    setAudioVol(audioGetVolume());
+    // Carrega volume salvo (real) e converte pra UI
+    setAudioVol(realToUiVolume(audioGetVolume()));
     setSfxVol(sfxGetVolume());
 
     // Tenta retomar audio em qualquer click do user (autoplay-bypass)
@@ -1068,20 +1072,27 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     const vantageStr = r.bothD20
       ? ` (${r.vantage === "advantage" ? "vantagem" : "desvantagem"}: ${r.bothD20[0]} ${r.vantage === "advantage" ? "↑" : "↓"} ${r.bothD20[1]})`
       : "";
+    const rollText = contexto
+      ? `${contexto}: ${expr}${vantageStr} → ${r.total}${r.critical ? " ⚜ CRÍTICO" : r.fumble ? " ☠ falha crítica" : ""}`
+      : `${expr}${vantageStr} → ${r.total}`;
     await logEvent({
       actor_type: "player",
       event_type: "roll",
       payload: {
         nick: me?.nick || "viajante",
-        text: contexto
-          ? `${contexto}: ${expr}${vantageStr} → ${r.total}${r.critical ? " ⚜ CRÍTICO" : r.fumble ? " ☠ falha crítica" : ""}`
-          : `${expr}${vantageStr} → ${r.total}`,
+        text: rollText,
         result: r,
       },
     });
     setShowDados(false);
-    if (pendingRoll) setPendingRoll({ ...pendingRoll, rolled: true });
-    setVantageMode("normal"); // reseta após rolar
+    const wasPending = !!pendingRoll;
+    if (pendingRoll) setPendingRoll(null); // limpa imediatamente
+    setVantageMode("normal");
+    // Se era pendente (Mestre pediu), automaticamente chama o DM pra narrar resultado
+    if (wasPending && !aguardandoIA) {
+      const prompt = `[rolagem do mestre que ele pediu] ${rollText}. Narre o resultado, considerando se foi sucesso, falha, crítico ou fumble. Continue a cena.`;
+      await chamarDM(prompt);
+    }
   }
 
   function rolarComMod(expr: string, modKey?: "for" | "des" | "con" | "int" | "sab" | "car") {
@@ -1209,9 +1220,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     }
   }
 
-  function setVolume(v: number) {
-    setAudioVol(v);
-    audioSetVolume(v);
+  function setVolume(uiV: number) {
+    setAudioVol(uiV);
+    audioSetVolume(uiToRealVolume(uiV));
   }
 
   function replayUltimaNarracao() {
@@ -1463,11 +1474,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           </div>
 
           {/* Input */}
-          <form onSubmit={enviarAcao} className="border-t border-[var(--color-pergaminho-velho)]/20 p-3 flex gap-2 bg-[var(--color-carvao)]/40">
-            <button type="button" onClick={() => setShowDados(true)} title="Rolar dados"
-              className="px-3 py-2 rounded border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-dourado)] text-sm hover:border-[var(--color-dourado)] flex-shrink-0">
-              🎲
-            </button>
+          <form onSubmit={(e) => e.preventDefault()} className="border-t border-[var(--color-pergaminho-velho)]/20 p-3 flex gap-2 bg-[var(--color-carvao)]/40">
             {pendingRoll && !pendingRoll.rolled && ehMeuTurno && (
               <button type="button" onClick={() => {
                 // Parse atributo da diretriz (FOR/DES/CON/INT/SAB/CAR ou STR/DEX/etc)
@@ -1512,24 +1519,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 ⚔ Atacar {pendingAttack.alvo}
               </button>
             )}
-            <input
-              type="text"
-              value={acaoTexto}
-              maxLength={1000}
-              onChange={(e) => setAcaoTexto(e.target.value.slice(0, 1000))}
-              placeholder={ehMeuTurno ? "Tua vez. Descreve a ação…" : `Aguardando ${players.find((p) => p.user_id === currentTurnUserId)?.display_name || "outro jogador"}…`}
+            <MicAcao
               disabled={aguardandoIA || !ehMeuTurno}
-              className="flex-1 px-3 py-2 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-dourado)] text-sm disabled:opacity-50"
+              placeholder={ehMeuTurno ? "Aperta o microfone e fala tua ação" : `Aguardando ${players.find((p) => p.user_id === currentTurnUserId)?.display_name || "outro jogador"}…`}
+              onTranscribed={async (texto) => {
+                if (!texto.trim() || aguardandoIA) return;
+                await chamarDM(texto.trim().slice(0, 1000));
+              }}
             />
-            {acaoTexto.length > 800 && (
-              <span className="text-[10px] text-[var(--color-pergaminho-velho)] self-center hidden sm:inline">
-                {acaoTexto.length}/1000
-              </span>
-            )}
-            <button type="submit" disabled={!acaoTexto.trim() || aguardandoIA || !ehMeuTurno}
-              className="px-4 py-2 rounded bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest hover:bg-[var(--color-sangue)] disabled:opacity-40 flex-shrink-0">
-              Falar
-            </button>
           </form>
         </section>
 
@@ -1874,6 +1871,166 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           <h4 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">História</h4>
           <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>
         </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * MicAcao — Push-to-talk. Player segura o botão, fala, solta — transcreve via
+ * /api/transcribe e dispara onTranscribed com o texto. Sem digitação.
+ */
+function MicAcao({
+  disabled,
+  placeholder,
+  onTranscribed,
+}: {
+  disabled: boolean;
+  placeholder: string;
+  onTranscribed: (texto: string) => Promise<void> | void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [erro, setErro] = useState<string | null>(null);
+  const [previewText, setPreviewText] = useState<string | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const streamRef = useRef<MediaStream | null>(null);
+  const startTimeRef = useRef<number>(0);
+
+  async function start() {
+    if (disabled || recording || transcribing) return;
+    setErro(null);
+    setPreviewText(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      streamRef.current = stream;
+      const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/webm")
+          ? "audio/webm"
+          : "audio/mp4";
+      const rec = new MediaRecorder(stream, { mimeType: mime });
+      recorderRef.current = rec;
+      chunksRef.current = [];
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      };
+      rec.onstop = async () => {
+        // Para o stream
+        streamRef.current?.getTracks().forEach((t) => t.stop());
+        streamRef.current = null;
+        const dur = Date.now() - startTimeRef.current;
+        if (dur < 400) {
+          setErro("Segura mais tempo");
+          setRecording(false);
+          return;
+        }
+        setRecording(false);
+        setTranscribing(true);
+        try {
+          const blob = new Blob(chunksRef.current, { type: mime });
+          const fd = new FormData();
+          fd.append("audio", blob, "acao.webm");
+          const r = await fetch("/api/transcribe", { method: "POST", body: fd });
+          const data = await r.json();
+          if (!r.ok) throw new Error(data.error || `${r.status}`);
+          const texto = (data.text || "").trim();
+          if (!texto) {
+            setErro("Não entendi — tenta de novo");
+            setTranscribing(false);
+            return;
+          }
+          setPreviewText(texto);
+          // Mostra preview por 1s antes de enviar (player vê o que vai mandar)
+          setTimeout(async () => {
+            await onTranscribed(texto);
+            setPreviewText(null);
+            setTranscribing(false);
+          }, 800);
+        } catch (e) {
+          setErro(e instanceof Error ? e.message : "Erro na transcrição");
+          setTranscribing(false);
+        }
+      };
+      rec.start();
+      startTimeRef.current = Date.now();
+      setRecording(true);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "permita o microfone";
+      setErro(msg);
+    }
+  }
+
+  function stop() {
+    if (!recording) return;
+    recorderRef.current?.stop();
+  }
+
+  // Cancel se sair da página
+  useEffect(() => {
+    return () => {
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  // Limpa erro após 3s
+  useEffect(() => {
+    if (!erro) return;
+    const t = setTimeout(() => setErro(null), 3000);
+    return () => clearTimeout(t);
+  }, [erro]);
+
+  const stateLabel = transcribing
+    ? "transcrevendo…"
+    : recording
+      ? "ouvindo… (solta pra enviar)"
+      : disabled
+        ? placeholder
+        : "Aperta e segura — fala tua ação";
+
+  return (
+    <div className="flex-1 flex items-center gap-3 px-3 py-2 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 min-h-[44px]">
+      <button
+        type="button"
+        disabled={disabled || transcribing}
+        onMouseDown={start}
+        onMouseUp={stop}
+        onMouseLeave={() => recording && stop()}
+        onTouchStart={(e) => { e.preventDefault(); start(); }}
+        onTouchEnd={(e) => { e.preventDefault(); stop(); }}
+        className={`flex items-center justify-center w-10 h-10 rounded-full transition flex-shrink-0 ${
+          recording
+            ? "bg-[var(--color-sangue)] border-2 border-[var(--color-sangue)] text-white animate-pulse scale-110"
+            : transcribing
+              ? "bg-[var(--color-vinho)] border-2 border-[var(--color-dourado)] text-[var(--color-pergaminho)]"
+              : disabled
+                ? "bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/30 text-[var(--color-pergaminho-velho)]/40 cursor-not-allowed"
+                : "bg-[var(--color-vinho)] border-2 border-[var(--color-dourado)] text-[var(--color-pergaminho)] hover:bg-[var(--color-sangue)] active:scale-95"
+        }`}
+        aria-label="Apertar e segurar pra falar"
+      >
+        {transcribing ? (
+          <span className="animate-spin">✦</span>
+        ) : (
+          <span className="text-xl leading-none">🎤</span>
+        )}
+      </button>
+      <div className="flex-1 min-w-0 text-sm">
+        {erro ? (
+          <span className="text-[var(--color-sangue)] italic">{erro}</span>
+        ) : previewText ? (
+          <span className="text-[var(--color-dourado)] italic truncate block">&ldquo;{previewText}&rdquo;</span>
+        ) : (
+          <span className={`italic ${recording ? "text-[var(--color-sangue)]" : disabled ? "text-[var(--color-pergaminho-velho)]/50" : "text-[var(--color-pergaminho-velho)]"}`}>
+            {stateLabel}
+          </span>
+        )}
+      </div>
+      {recording && (
+        <span className="text-[10px] uppercase tracking-widest text-[var(--color-sangue)] animate-pulse flex-shrink-0">
+          ● rec
+        </span>
       )}
     </div>
   );

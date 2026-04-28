@@ -80,7 +80,8 @@ export function detectMoodFromText(text: string): Mood | null {
 
 let currentAudio: HTMLAudioElement | null = null;
 let currentMood: Mood | null = null;
-let masterVolume = 0.35;
+// Default baixo — música é ambiente, não primeiro plano. Player ajusta no painel.
+let masterVolume = 0.18;
 
 const VOL_KEY = "lavierta:audio:volume";
 const MUTED_KEY = "lavierta:audio:muted";

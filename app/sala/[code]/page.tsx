@@ -166,7 +166,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   const [ttsOn, setTtsOn] = useState(false);
   const [audioMuted, setAudioMuted] = useState(true);
-  const [audioVol, setAudioVol] = useState(0.35);
+  const [audioVol, setAudioVol] = useState(0.18);
   const [showFicha, setShowFicha] = useState(false);
   const [showLiga, setShowLiga] = useState(false);
   const [showDados, setShowDados] = useState(false);
@@ -2813,7 +2813,8 @@ function MestreInvocando({ estagio }: { estagio: "tecendo" | "narrando" }) {
   const [idx, setIdx] = useState(() => Math.floor(Math.random() * frases.length));
 
   useEffect(() => {
-    const i = setInterval(() => setIdx((x) => (x + 1) % frases.length), 1900);
+    // Tempo confortável pra leitura: ~4s por frase (era 1.9s — rápido demais)
+    const i = setInterval(() => setIdx((x) => (x + 1) % frases.length), 4000);
     return () => clearInterval(i);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [estagio]);
@@ -2822,24 +2823,27 @@ function MestreInvocando({ estagio }: { estagio: "tecendo" | "narrando" }) {
     <div className="flex items-center gap-3 px-4 py-3 rounded border border-[var(--color-dourado)]/30 bg-gradient-to-r from-[var(--color-carvao)]/60 via-[var(--color-vinho)]/10 to-[var(--color-carvao)]/60 shadow-inner">
       {/* Selo místico animado: anel girando + brasa pulsando dentro */}
       <div className="relative w-7 h-7 flex-shrink-0">
-        <div className="absolute inset-0 rounded-full border-2 border-[var(--color-dourado)]/20 border-t-[var(--color-dourado)] border-r-[var(--color-dourado)]/70 animate-spin" style={{ animationDuration: "2.4s" }} />
+        <div className="absolute inset-0 rounded-full border-2 border-[var(--color-dourado)]/20 border-t-[var(--color-dourado)] border-r-[var(--color-dourado)]/70 animate-spin" style={{ animationDuration: "3s" }} />
         <div className="absolute inset-1.5 rounded-full bg-[var(--color-dourado)]/30 animate-pulse" />
         <div className="absolute inset-2.5 rounded-full bg-[var(--color-vinho)]/80" />
       </div>
       <div className="flex-1 min-w-0">
         <p
           key={idx}
-          className="text-[var(--color-dourado)] italic text-sm font-[family-name:var(--font-cinzel)] tracking-wide animate-[fadeIn_0.8s_ease-out]"
+          className="text-[var(--color-dourado)] italic text-sm font-[family-name:var(--font-cinzel)] tracking-wide animate-[fadeMistico_4s_ease-in-out]"
         >
           {frases[idx]}
         </p>
-        {/* Linha de tinta correndo */}
-        <div className="mt-1.5 h-px w-full bg-gradient-to-r from-transparent via-[var(--color-dourado)]/50 to-transparent animate-[inkRun_2.4s_ease-in-out_infinite]" />
+        {/* Linha de tinta correndo (sincronizada com tempo de leitura) */}
+        <div className="mt-1.5 h-px w-full bg-gradient-to-r from-transparent via-[var(--color-dourado)]/50 to-transparent animate-[inkRun_4s_ease-in-out_infinite]" />
       </div>
       <style jsx>{`
-        @keyframes fadeIn {
-          from { opacity: 0; transform: translateY(2px); }
-          to { opacity: 1; transform: translateY(0); }
+        /* Frase fade-in lento, fica legível, fade-out lento */
+        @keyframes fadeMistico {
+          0%   { opacity: 0; transform: translateY(3px); }
+          15%  { opacity: 1; transform: translateY(0); }
+          85%  { opacity: 1; transform: translateY(0); }
+          100% { opacity: 0; transform: translateY(-2px); }
         }
         @keyframes inkRun {
           0% { transform: scaleX(0.2); transform-origin: left; opacity: 0.2; }

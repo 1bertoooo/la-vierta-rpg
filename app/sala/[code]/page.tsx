@@ -1534,7 +1534,17 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     const sb = getSupabase();
     const totalAtivos = jogadoresAtivos.length;
     if (totalAtivos === 0) {
-      await chamarDM(txt); // fallback: jogador solo
+      // Fallback solo (sem player records ativos): wrap como rodada de 1 pra
+      // o DM NÃO interpretar como "aguardando os outros".
+      // Bug T1 — antes ficava "aguardando os outros" preso, sem progredir.
+      const wrapper = `[Rodada — solo player]\n@${me.nick || "viajante"}: ${txt}\n\nNarre o resultado tratando como rodada completa de 1 jogador.`;
+      // Loga como speak normal (não silent — player vê sua ação no chat)
+      await logEvent({
+        actor_type: "player",
+        event_type: "speak",
+        payload: { text: txt, nick: me.nick || "viajante" },
+      });
+      await chamarDM(wrapper, { silent: true });
       return;
     }
     try {
@@ -2853,8 +2863,9 @@ function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: 
         const icone = isHope ? "✨" : isFear ? "🩸" : k === "doom" ? "⚰" : k === "arco" ? "⌛" : "⚡";
         return (
           <div key={k} className="flex items-center gap-2 min-w-0 flex-shrink-0" title={`${c.label || k}: ${c.current}/${c.max}`}>
-            <span className="text-[9px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] flex-shrink-0">
-              {icone} {c.current}/{c.max}
+            <span className="text-sm sm:text-base flex-shrink-0" aria-hidden>{icone}</span>
+            <span className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] flex-shrink-0 font-[family-name:var(--font-cinzel)]">
+              {c.current}/{c.max}
             </span>
             <div className="flex gap-0.5">
               {Array.from({ length: c.max }).map((_, i) => (
@@ -2869,7 +2880,7 @@ function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: 
               ))}
             </div>
             {c.label && (
-              <span className="hidden lg:inline text-[10px] text-[var(--color-pergaminho-velho)] italic truncate max-w-32">
+              <span className="hidden md:inline text-[10px] text-[var(--color-pergaminho-velho)] italic truncate max-w-32">
                 {c.label}
               </span>
             )}

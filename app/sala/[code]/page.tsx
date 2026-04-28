@@ -262,6 +262,74 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     return () => clearTimeout(t);
   }, [log.length]);
 
+  // Sprint H — admin/shadow auto-recovery + auto-skip AFK.
+  // A cada 30s, em phase 'collecting' há > 60s sem progresso, faz auto-skip dos players AFK
+  // (last_seen > 90s). Em phase 'narrating' ou 'rolling' há > 90s, força reset.
+  useEffect(() => {
+    if (!sessionId) return;
+    const sb = getSupabase();
+    const ativos = players.filter((p) => p.user_id);
+    const sou1oOrdem = ativos.length > 0 && [...ativos].sort((a, b) => a.id.localeCompare(b.id))[0]?.user_id === me?.id;
+    const eligivel = isAdmin || sou1oOrdem;
+    if (!eligivel) return;
+
+    const collectingStartRef = { t: 0 };
+    const stuckStartRef = { t: 0 };
+
+    const tick = async () => {
+      try {
+        const { data: sess } = await sb
+          .from("sessions")
+          .select("round_phase, pending_actions")
+          .eq("id", sessionId)
+          .maybeSingle();
+        if (!sess) return;
+        const phase = sess.round_phase as RoundPhase;
+        const acoes = (sess.pending_actions as PendingAction[]) || [];
+        const now = Date.now();
+
+        if (phase === "collecting") {
+          if (collectingStartRef.t === 0) collectingStartRef.t = now;
+          stuckStartRef.t = 0;
+          // Após 60s em collecting, auto-skip AFK (last_seen > 90s)
+          if (now - collectingStartRef.t > 60_000) {
+            const totalAtivos = players.filter(
+              (p) => p.user_id && new Date(p.last_seen_at).getTime() > now - 5 * 60 * 1000
+            ).length;
+            const afks = players.filter((p) => {
+              if (!p.user_id) return false;
+              if (acoes.some((a) => a.player_id === p.user_id)) return false; // já agiu
+              return new Date(p.last_seen_at).getTime() < now - 90_000;
+            });
+            for (const afk of afks) {
+              await sb.rpc("skip_player_in_round", {
+                p_session_id: sessionId,
+                p_player_id: afk.user_id,
+                p_nick: afk.display_name,
+                p_total: totalAtivos,
+              }).catch(() => {});
+            }
+          }
+        } else if (phase === "narrating" || phase === "rolling") {
+          if (stuckStartRef.t === 0) stuckStartRef.t = now;
+          collectingStartRef.t = 0;
+          // Após 90s em narrating/rolling sem progresso, força reset
+          if (now - stuckStartRef.t > 90_000) {
+            await sb.rpc("force_complete_round", { p_session_id: sessionId }).catch(() => {});
+            stuckStartRef.t = 0;
+          }
+        } else {
+          collectingStartRef.t = 0;
+          stuckStartRef.t = 0;
+        }
+      } catch {}
+    };
+
+    tick(); // imediato
+    const interval = setInterval(tick, 30_000);
+    return () => clearInterval(interval);
+  }, [sessionId, isAdmin, players, me?.id]);
+
   // Limpa pendingRoll expirado (90s — protege contra estado preso se Mestre nunca for re-acionado)
   useEffect(() => {
     if (!pendingRoll?.expiresAt) return;
@@ -3038,6 +3106,20 @@ function RodadaBadge({
   }, [phase]);
   const ehStuck = stuckSeconds > 60;
 
+  // Sprint H — countdown drama "Mestre vai narrar em 3, 2, 1" quando phase vira narrating
+  const [countdown, setCountdown] = useState<number | null>(null);
+  useEffect(() => {
+    if (phase !== "narrating") {
+      setCountdown(null);
+      return;
+    }
+    setCountdown(3);
+    const t1 = setTimeout(() => setCountdown(2), 800);
+    const t2 = setTimeout(() => setCountdown(1), 1600);
+    const t3 = setTimeout(() => setCountdown(null), 2400);
+    return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); };
+  }, [phase]);
+
   return (
     <div className="border-b border-[var(--color-pergaminho-velho)]/20 bg-[var(--color-carvao)]/30 px-4 py-2">
       <div className="flex items-baseline justify-between gap-3 flex-wrap">
@@ -3087,6 +3169,15 @@ function RodadaBadge({
           {targetRoll && meuNick && targetRoll.toLowerCase() === meuNick.toLowerCase() && (
             <p className="text-[10px] text-[var(--color-dourado)] mt-1 italic">é tua rolagem · clica em Rolar abaixo</p>
           )}
+        </div>
+      )}
+
+      {/* Sprint H — countdown dramático "Mestre vai narrar em 3, 2, 1" */}
+      {countdown !== null && phase === "narrating" && (
+        <div className="mt-2 text-center">
+          <p className="text-xs uppercase tracking-[0.4em] text-[var(--color-dourado)] dourado-glow animate-pulse">
+            Mestre tece em {countdown}…
+          </p>
         </div>
       )}
 

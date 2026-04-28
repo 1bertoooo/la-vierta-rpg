@@ -10,7 +10,7 @@ function LoginInner() {
   const search = useSearchParams();
   const next = search.get("next") || "/sala/velreth-elite";
 
-  const [email, setEmail] = useState("");
+  const [nick, setNick] = useState("");
   const [senha, setSenha] = useState("");
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
@@ -21,11 +21,25 @@ function LoginInner() {
     setErro(null);
     try {
       const sb = getSupabase();
+
+      // 1. Traduz nick em email via RPC pública
+      const { data: email, error: rpcErr } = await sb.rpc("email_by_nick", {
+        p_nick: nick.trim(),
+      });
+      if (rpcErr) throw rpcErr;
+      if (!email) {
+        setErro("Nick não encontrado. Forja uma conta primeiro.");
+        setLoading(false);
+        return;
+      }
+
+      // 2. Login com email + senha
       const { error } = await sb.auth.signInWithPassword({
-        email: email.trim(),
+        email,
         password: senha,
       });
       if (error) throw error;
+
       router.push(next);
       router.refresh();
     } catch (e) {
@@ -55,25 +69,39 @@ function LoginInner() {
         </p>
 
         <form onSubmit={entrar} className="space-y-4">
-          <input
-            type="email"
-            required
-            placeholder="teu.email@reino.lv"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            disabled={loading}
-            className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] font-[family-name:var(--font-lora)] focus:outline-none focus:border-[var(--color-dourado)] transition"
-          />
-          <input
-            type="password"
-            required
-            minLength={6}
-            placeholder="sua senha secreta"
-            value={senha}
-            onChange={(e) => setSenha(e.target.value)}
-            disabled={loading}
-            className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] font-[family-name:var(--font-lora)] focus:outline-none focus:border-[var(--color-dourado)] transition"
-          />
+          <div>
+            <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
+              Nick
+            </label>
+            <input
+              type="text"
+              required
+              minLength={2}
+              maxLength={30}
+              autoComplete="username"
+              placeholder="teu nick"
+              value={nick}
+              onChange={(e) => setNick(e.target.value)}
+              disabled={loading}
+              className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] font-[family-name:var(--font-lora)] focus:outline-none focus:border-[var(--color-dourado)] transition"
+            />
+          </div>
+          <div>
+            <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
+              Senha
+            </label>
+            <input
+              type="password"
+              required
+              minLength={6}
+              autoComplete="current-password"
+              placeholder="•••••••"
+              value={senha}
+              onChange={(e) => setSenha(e.target.value)}
+              disabled={loading}
+              className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] font-[family-name:var(--font-lora)] focus:outline-none focus:border-[var(--color-dourado)] transition"
+            />
+          </div>
           <button
             type="submit"
             disabled={loading}
@@ -109,9 +137,9 @@ function LoginInner() {
 
 function traduzirErro(msg: string): string {
   const lower = msg.toLowerCase();
-  if (lower.includes("invalid login")) return "Email ou senha incorretos.";
+  if (lower.includes("invalid login")) return "Nick ou senha incorretos.";
   if (lower.includes("email not confirmed"))
-    return "Email ainda não confirmado. Verifica tua caixa-mensageira.";
+    return "Conta ainda não confirmada. Verifica tua caixa-mensageira.";
   if (lower.includes("too many"))
     return "Muitas tentativas. Espera um instante.";
   return msg;

@@ -5,29 +5,51 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { getSupabase } from "@/lib/supabase/client";
 
+const NICK_REGEX = /^[a-zA-Z0-9_-]{2,30}$/;
+
 function CadastroInner() {
   const router = useRouter();
   const search = useSearchParams();
   const next = search.get("next") || "/sala/velreth-elite";
 
-  const [email, setEmail] = useState("");
-  const [senha, setSenha] = useState("");
   const [nick, setNick] = useState("");
+  const [senha, setSenha] = useState("");
   const [loading, setLoading] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
   const [emailEnviado, setEmailEnviado] = useState(false);
 
   async function cadastrar(e: React.FormEvent) {
     e.preventDefault();
-    setLoading(true);
     setErro(null);
+
+    const nickLimpo = nick.trim().toLowerCase();
+    if (!NICK_REGEX.test(nickLimpo)) {
+      setErro("Nick: 2 a 30 caracteres, só letras, números, _ ou -.");
+      return;
+    }
+
+    setLoading(true);
     try {
       const sb = getSupabase();
+
+      // Verifica se nick já existe
+      const { data: existing } = await sb.rpc("email_by_nick", {
+        p_nick: nickLimpo,
+      });
+      if (existing) {
+        setErro("Esse nick já tá em uso. Escolhe outro.");
+        setLoading(false);
+        return;
+      }
+
+      // Email sintético baseado no nick
+      const emailSintetico = `${nickLimpo}@lavierta.app`;
+
       const { data, error } = await sb.auth.signUp({
-        email: email.trim(),
+        email: emailSintetico,
         password: senha,
         options: {
-          data: { nick: nick.trim() },
+          data: { nick: nickLimpo },
           emailRedirectTo:
             typeof window !== "undefined"
               ? `${window.location.origin}/sala/velreth-elite`
@@ -36,14 +58,23 @@ function CadastroInner() {
       });
       if (error) throw error;
 
-      // Se já tem session (email confirmation off), entra direto
       if (data.session) {
         router.push(next);
         router.refresh();
         return;
       }
 
-      // Caso contrário, pede pra confirmar email
+      // Email confirmation pode estar habilitada — mas como o email é sintético, não vai chegar.
+      // Tenta logar direto:
+      const { error: loginErr } = await sb.auth.signInWithPassword({
+        email: emailSintetico,
+        password: senha,
+      });
+      if (!loginErr) {
+        router.push(next);
+        router.refresh();
+        return;
+      }
       setEmailEnviado(true);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Erro ao criar conta";
@@ -62,15 +93,15 @@ function CadastroInner() {
           </h1>
           <div className="bg-[var(--color-floresta)]/20 border border-[var(--color-dourado)]/50 rounded p-6">
             <p className="text-[var(--color-pergaminho)] mb-2">
-              Um pergaminho foi enviado pra{" "}
-              <span className="text-[var(--color-dourado)]">{email}</span>.
+              Conta criada como{" "}
+              <span className="text-[var(--color-dourado)]">{nick}</span>.
             </p>
             <p className="text-sm text-[var(--color-pergaminho-velho)]">
-              Confirma teu email pra cruzar o portão.
+              Vai pra Entrar e usa teu nick + senha.
             </p>
           </div>
-          <Link href="/login" className="btn-selo-secundario inline-block mt-8">
-            Voltar ao portão
+          <Link href="/login" className="btn-selo inline-block mt-8">
+            Entrar agora
           </Link>
         </div>
       </main>
@@ -99,33 +130,23 @@ function CadastroInner() {
         <form onSubmit={cadastrar} className="space-y-4">
           <div>
             <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
-              Nick (nome de viajante)
+              Nick (teu nome neste reino)
             </label>
             <input
               type="text"
               required
               minLength={2}
               maxLength={30}
-              placeholder="Como queres ser chamado"
+              autoComplete="username"
+              placeholder="ex: yumi, luiz, nelson"
               value={nick}
               onChange={(e) => setNick(e.target.value)}
               disabled={loading}
               className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] font-[family-name:var(--font-lora)] focus:outline-none focus:border-[var(--color-dourado)] transition"
             />
-          </div>
-          <div>
-            <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
-              Email
-            </label>
-            <input
-              type="email"
-              required
-              placeholder="teu.email@reino.lv"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              disabled={loading}
-              className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] font-[family-name:var(--font-lora)] focus:outline-none focus:border-[var(--color-dourado)] transition"
-            />
+            <p className="text-xs text-[var(--color-pedra)] mt-1.5">
+              Só letras, números, _ ou -. Vai ser teu login.
+            </p>
           </div>
           <div>
             <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
@@ -135,6 +156,7 @@ function CadastroInner() {
               type="password"
               required
               minLength={6}
+              autoComplete="new-password"
               placeholder="•••••••"
               value={senha}
               onChange={(e) => setSenha(e.target.value)}
@@ -175,10 +197,9 @@ function CadastroInner() {
 function traduzirErro(msg: string): string {
   const lower = msg.toLowerCase();
   if (lower.includes("already registered") || lower.includes("user already"))
-    return "Esse email já tem conta — vai pra Entrar.";
+    return "Esse nick já tem conta — vai pra Entrar.";
   if (lower.includes("password") && lower.includes("short"))
     return "Senha muito curta (mín. 6 caracteres).";
-  if (lower.includes("invalid email")) return "Email inválido.";
   if (lower.includes("nick") && lower.includes("unique"))
     return "Esse nick já existe — escolhe outro.";
   return msg;

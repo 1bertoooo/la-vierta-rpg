@@ -329,7 +329,25 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     };
   }, []);
 
-  // Heartbeat: pinga last_seen_at a cada 30s pra outros saberem que tô online
+  // Sprint G — restaura draft do input se houver um salvo
+  useEffect(() => {
+    if (!campaign?.id) return;
+    try {
+      const saved = localStorage.getItem(`la-vierta-draft-${campaign.id}`);
+      if (saved) setAcaoTexto(saved);
+    } catch {}
+  }, [campaign?.id]);
+
+  // Limpa draft após enviar com sucesso (acaoTexto vira "" no enviarAcao)
+  useEffect(() => {
+    if (!campaign?.id) return;
+    if (acaoTexto === "") {
+      try { localStorage.removeItem(`la-vierta-draft-${campaign.id}`); } catch {}
+    }
+  }, [acaoTexto, campaign?.id]);
+
+  // Heartbeat — Sprint G: 15s (era 30s). Detecta inatividade mais rápido pra
+  // jogadoresAtivos refletir desconexões em ~16-20s e admin poder pular AFK.
   useEffect(() => {
     if (!me?.id || !campaign?.id) return;
     const sb = getSupabase();
@@ -342,8 +360,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       } catch {}
     };
     ping(); // imediato
-    const interval = setInterval(ping, 30000);
-    return () => clearInterval(interval);
+    const interval = setInterval(ping, 15000);
+    // Pinga também on visibility change (volta da aba)
+    const onVis = () => { if (document.visibilityState === "visible") ping(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [me?.id, campaign?.id]);
 
   // Esc fecha modais abertos
@@ -681,6 +705,18 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               const { data } = await sb.from("combat_initiative").select("*").eq("session_id", sId as string).order("position", { ascending: true });
               if (!cancelled) setIniciativa((data as IniciativaItem[]) || []);
             }
+          ).on(
+            // Sprint G — Bug 9 fix real: private_asides com RLS. Cada client só vê
+            // os asides cujo target_nick === seu nick. INSERT dispara modal local.
+            "postgres_changes", { event: "INSERT", schema: "public", table: "private_asides", filter: `session_id=eq.${sId}` },
+            (payload) => {
+              const aside = payload.new as { target_nick: string; text: string };
+              const myNick = (me?.nick || "").toLowerCase();
+              if (aside.target_nick.toLowerCase() === myNick) {
+                setAsideRecebido(aside.text);
+                sfxPlay("bell");
+              }
+            }
           ).subscribe();
           unsubs.push(() => sb.removeChannel(ch2));
 
@@ -948,11 +984,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           break;
         }
         case "aside": {
-          // Bug 9 fix — aside é privado. Não exibe pra outros via realtime do log:
-          // o filtro por target já cuida do display, mas o TEXTO ainda está no
-          // combat_log.payload visível via DevTools. Solução: o admin (que recebe
-          // a narração primeiro) faz broadcast via channel privado pro target,
-          // e o texto do aside é apagado da narração antes do display.
+          // Legacy — caso o Mestre ainda gere [ASIDE: ...] sem o pipeline novo passar.
+          // O pipeline normal extrai pra private_asides ANTES de logar; isso é fallback.
           const myNick = me?.nick;
           if (!myNick) break;
           if (d.target.toLowerCase() === myNick.toLowerCase()) {
@@ -961,6 +994,26 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               sfxPlay("bell");
             }, Math.max(0, delayMs));
           }
+          break;
+        }
+        case "asidePrivate": {
+          // Sprint G — indicador público sutil. O texto real chega via subscription
+          // a private_asides (RLS filtra ao target). Aqui só anuncia que algo aconteceu.
+          setTimeout(() => {
+            sfxPlay("bell");
+            // Toast leve no log (sem revelar conteúdo)
+            const myNick = (me?.nick || "").toLowerCase();
+            const isPraMim = d.target.toLowerCase() === myNick;
+            logEvent({
+              actor_type: "system",
+              event_type: "info",
+              payload: {
+                text: isPraMim
+                  ? `📜 O Mestre te cochicha algo (abre teu Aside)`
+                  : `📜 O Mestre cochicha algo a ${d.target}`,
+              },
+            }).catch(() => {});
+          }, Math.max(0, delayMs));
           break;
         }
         case "panel": {
@@ -1181,7 +1234,28 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
       // O texto cru vai pro DB com diretivas embutidas — o realtime parser cuida.
       // Mas mantemos uma versão limpa pra exibir (pra evitar [TAG] aparecer pro player).
-      const textComDirs = (data.text as string).trim();
+      const textRaw = (data.text as string).trim();
+
+      // Sprint G / Bug 9 fix real — extrai asides do texto, insere em private_asides
+      // (RLS limita SELECT ao target_nick), e substitui no log por placeholder.
+      // Resultado: o texto público no combat_log NÃO contém o conteúdo do aside.
+      const asideRe = /\[ASIDE\s+([a-zA-Z0-9_-]+)\s*:\s*([^\]]+)\]/gi;
+      const asideRows: { session_id: string; target_nick: string; text: string }[] = [];
+      let mAside: RegExpExecArray | null;
+      const re2 = new RegExp(asideRe.source, asideRe.flags);
+      while ((mAside = re2.exec(textRaw)) !== null) {
+        if (sessionId) {
+          asideRows.push({
+            session_id: sessionId,
+            target_nick: mAside[1].toLowerCase(),
+            text: mAside[2].trim(),
+          });
+        }
+      }
+      if (asideRows.length > 0) {
+        try { await sb.from("private_asides").insert(asideRows); } catch {}
+      }
+      const textComDirs = textRaw.replace(asideRe, (_, target) => `[ASIDE_PRIVATE @${target.toLowerCase()}]`);
 
       // Sincronização: timestamp futuro de 7s pra todos os clients tocarem juntos.
       // Janela maior dá tempo pro TTS preload terminar antes do play_at.
@@ -1190,7 +1264,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         actor_type: "dm",
         event_type: "narration",
         payload: {
-          text: textComDirs, // texto cru com diretivas — parser do client extrai
+          text: textComDirs, // texto SEM o conteúdo dos asides (eles vão por RLS-filtered table)
           directives: data.directives,
           provider: data.provider,
           play_at: playAt,
@@ -1958,6 +2032,28 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 if (!texto.trim() || aguardandoIA || mestreEscrevendo) return;
                 await enviarAcaoTexto(texto.trim().slice(0, 1000));
               }}
+            />
+            {/* Sprint G — input de texto com draft persistente em localStorage.
+                Player pode digitar quando não pode/quer usar voz. */}
+            <input
+              type="text"
+              value={acaoTexto}
+              onChange={(e) => {
+                const v = e.target.value.slice(0, 1000);
+                setAcaoTexto(v);
+                if (campaign?.id) {
+                  try { localStorage.setItem(`la-vierta-draft-${campaign.id}`, v); } catch {}
+                }
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  enviarAcao();
+                }
+              }}
+              disabled={aguardandoIA || mestreEscrevendo || !ehMeuTurno || !!pendingRoll || jaAgiNestaRodada}
+              placeholder="…ou digita e dá Enter"
+              className="flex-1 min-w-0 px-3 py-2 rounded bg-[var(--color-carvao)]/60 border border-[var(--color-pergaminho-velho)]/30 text-[var(--color-pergaminho)] placeholder:text-[var(--color-pedra)] text-sm focus:outline-none focus:border-[var(--color-dourado)]/50 disabled:opacity-50"
             />
           </form>
         </section>

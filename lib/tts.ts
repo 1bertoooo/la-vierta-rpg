@@ -226,20 +226,43 @@ async function tocarChunkAtual() {
   }
 }
 
-export function ttsSpeak(text: string, opts?: { force?: boolean }) {
+/**
+ * Pre-carrega todos os chunks no cache antes de tocar.
+ * Quando playAt chega, todos clientes têm o áudio pronto e tocam ao mesmo tempo.
+ */
+async function preloadChunks(text: string) {
+  const cs = dividirEmChunks(text);
+  await Promise.all(cs.map((c) => fetchAudio(c.text, c.voice).catch(() => null)));
+}
+
+export function ttsSpeak(text: string, opts?: { force?: boolean; playAt?: number }) {
   if (typeof window === "undefined") return;
   if (!text.trim()) return;
 
   if (opts?.force) {
     ttsStop();
   }
-  if (audioEl && !audioEl.paused) {
+  if (audioEl && !audioEl.paused && !opts?.playAt) {
     return;
   }
 
   stopped = false;
   chunks = dividirEmChunks(text);
   speakingChunkIdx = 0;
+
+  // Sincronização: se playAt foi setado, pre-carrega tudo e dispara no momento exato
+  if (opts?.playAt) {
+    const wait = Math.max(0, opts.playAt - Date.now());
+    // Pre-carrega áudio em paralelo durante a espera
+    preloadChunks(text).then(() => {
+      const remaining = Math.max(0, opts.playAt! - Date.now());
+      setTimeout(() => {
+        if (!stopped) tocarChunkAtual();
+      }, remaining);
+    });
+    return;
+  }
+
   tocarChunkAtual();
 }
 

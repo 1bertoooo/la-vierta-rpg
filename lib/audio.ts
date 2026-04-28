@@ -38,41 +38,11 @@ export type Mood =
   | "ascension"   // revelação, ascensão
   | "silence";
 
-const MOOD_TRACKS: Record<Mood, string> = {
-  tavern: "https://cdn.pixabay.com/audio/2024/02/05/audio_e0fb0d80b9.mp3",
-  dungeon: "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
-  forest: "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
-  city: "https://cdn.pixabay.com/audio/2024/02/05/audio_e0fb0d80b9.mp3",
-  desert: "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  sea: "https://cdn.pixabay.com/audio/2022/03/15/audio_92a5f54849.mp3",
-  snow: "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
-  mountain: "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
-  palace: "https://cdn.pixabay.com/audio/2022/03/15/audio_92a5f54849.mp3",
-  temple: "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
-  swamp: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  cave: "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
-
-  battle: "https://cdn.pixabay.com/audio/2023/07/30/audio_e1ff09da95.mp3",
-  boss: "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
-  calm: "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
-  mystery: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  romance: "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  ritual: "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
-  tragic: "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  victory: "https://cdn.pixabay.com/audio/2023/07/30/audio_e1ff09da95.mp3",
-  chase: "https://cdn.pixabay.com/audio/2023/07/30/audio_e1ff09da95.mp3",
-  horror: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  stealth: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  epic: "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
-  dread: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  crowd: "https://cdn.pixabay.com/audio/2024/02/05/audio_e0fb0d80b9.mp3",
-  noble: "https://cdn.pixabay.com/audio/2022/03/15/audio_92a5f54849.mp3",
-  prayer: "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
-  memory: "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  ascension: "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
-
-  silence: "",
-};
+// Proxy local — resolve CORS do Pixabay e cache no edge da Vercel
+function moodUrl(mood: Mood): string {
+  if (mood === "silence") return "";
+  return `/api/music?mood=${mood}`;
+}
 
 /** Auto-detecta mood por keyword se a IA esquecer de marcar */
 export function detectMoodFromText(text: string): Mood | null {
@@ -197,7 +167,7 @@ export function audioPlayMood(mood: Mood) {
     currentAudio = null;
   }
 
-  const url = MOOD_TRACKS[mood];
+  const url = moodUrl(mood);
   if (!url) {
     currentMood = mood;
     return;
@@ -206,7 +176,7 @@ export function audioPlayMood(mood: Mood) {
   const audio = new Audio(url);
   audio.loop = true;
   audio.volume = masterVolume;
-  audio.crossOrigin = "anonymous";
+  // SEM crossOrigin — same-origin via /api/music
   audio.preload = "auto";
   audio.addEventListener("error", (e) => log("erro carregando", url, e));
   audio.addEventListener("playing", () => log("playing", mood));

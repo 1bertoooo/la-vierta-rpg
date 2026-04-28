@@ -249,10 +249,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               const ev = payload.new as LogEvent;
               setLog((prev) => [...prev, ev]);
 
-              // TTS automático em narrações
+              // TTS automático em narrações — sincronizado com play_at
               if (ev.actor_type === "dm" && ev.event_type === "narration" && ttsIsEnabled()) {
                 const txt = (ev.payload.text as string) || "";
-                ttsSpeak(txt);
+                const playAt = ev.payload.play_at as number | undefined;
+                ttsSpeak(txt, playAt ? { playAt } : undefined);
               }
               const directives = (ev.payload as { directives?: { roll?: string; music_mood?: string } })?.directives;
               if (ev.actor_type === "dm" && directives?.roll) {
@@ -400,10 +401,12 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         .replace(/\[MUSICA:[^\]]+\]/gi, "")
         .trim();
 
+      // Sincronização: marca timestamp futuro de 5s pra todos os clients tocarem juntos
+      const playAt = Date.now() + 5000;
       await logEvent({
         actor_type: "dm",
         event_type: "narration",
-        payload: { text: textLimpo, directives: data.directives, provider: data.provider },
+        payload: { text: textLimpo, directives: data.directives, provider: data.provider, play_at: playAt },
       });
 
       // Avança turno automaticamente após resposta da IA (se não pediu roll)

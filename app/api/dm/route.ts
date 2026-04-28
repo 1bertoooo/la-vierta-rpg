@@ -63,15 +63,24 @@ function pickProviders(): ProviderConfig[] {
 }
 
 async function callOpenAI(cfg: ProviderConfig, messages: Msg[]): Promise<string> {
-  // Pra modelos GPT-5 / GPT-4o / GPT-3.5: temperature default tem que ser 1 ou removida
+  // GPT-5 é modelo de reasoning — gasta tokens "pensando" antes de gerar resposta.
+  // reasoning_effort: low evita gastar muito; max_completion_tokens precisa de folga
+  // (envolve reasoning_tokens + tokens visíveis).
   const isGPT5 = cfg.model.startsWith("gpt-5");
-  const body = {
-    model: cfg.model,
-    messages,
-    ...(isGPT5
-      ? { max_completion_tokens: 700 } // GPT-5 usa max_completion_tokens
-      : { max_tokens: 700, temperature: 0.85, top_p: 0.95 }),
-  };
+  const body = isGPT5
+    ? {
+        model: cfg.model,
+        messages,
+        max_completion_tokens: 1500,
+        reasoning_effort: "low",
+      }
+    : {
+        model: cfg.model,
+        messages,
+        max_tokens: 700,
+        temperature: 0.85,
+        top_p: 0.95,
+      };
   const r = await fetch(cfg.url, {
     method: "POST",
     headers: {

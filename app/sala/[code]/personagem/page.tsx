@@ -647,29 +647,14 @@ export default function CriacaoPage({
                       </button>
                     )}
 
-                    {estado !== "carregando" && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          regerarSlot(idx);
-                        }}
-                        className="absolute top-1 right-1 w-6 h-6 rounded-full bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-dourado)] text-xs hover:border-[var(--color-dourado)] z-10"
-                        title="Trocar este retrato"
-                      >
-                        ↻
-                      </button>
-                    )}
                   </div>
                 );
               })}
             </div>
 
-            <div className="flex flex-wrap gap-3 mb-8 items-center">
-              <button onClick={regerarRetratos} className="btn-selo-secundario text-xs" disabled={step === "salvando"}>
-                ↻ Re-rolar retratos
-              </button>
-              <p className="text-xs text-[var(--color-pedra)] flex-1 self-center">
-                ✦ GPT-image-1 · ~10s por retrato · usa tua descrição da aparência (privada).
+            <div className="mb-8">
+              <p className="text-xs text-[var(--color-pedra)] italic">
+                ✦ GPT-image-1 · ~10s por retrato · usa tua descrição da aparência (privada). Escolhe o que mais te representa — uma vez salvo, fica.
               </p>
             </div>
 

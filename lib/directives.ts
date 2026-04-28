@@ -42,6 +42,7 @@ export type Directive =
   | { kind: "xp"; target: string; amount: number }
   | { kind: "clock"; name: string; op: "set" | "delta"; value: number }
   | { kind: "aside"; target: string; text: string }
+  | { kind: "asidePrivate"; target: string } // Sprint G — indicador público; texto vem via private_asides
   | { kind: "timeskip"; amount: string }
   | { kind: "panel"; description: string; caption: string };
 
@@ -188,6 +189,13 @@ function parseTag(tag: string, rest: string): Directive | null {
       const target = rest.slice(0, idx).trim();
       const text = rest.slice(idx + 1).trim();
       return { kind: "aside", target, text };
+    }
+
+    case "ASIDE_PRIVATE": {
+      // Sprint G — placeholder publico. Texto real em private_asides (RLS).
+      const m = rest.match(/@([a-zA-Z0-9_-]+)/);
+      if (!m) return null;
+      return { kind: "asidePrivate", target: m[1].toLowerCase() };
     }
 
     case "TIMESKIP": {

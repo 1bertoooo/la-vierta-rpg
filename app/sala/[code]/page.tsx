@@ -5,8 +5,10 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { getSupabase, type Profile } from "@/lib/supabase/client";
 import { setLastRoomCode } from "@/lib/player";
-import { rolarDados, DADOS_PADRAO, type DiceRoll } from "@/lib/dados";
+import { rolarDados, DADOS_PADRAO } from "@/lib/dados";
 import { ttsSpeak, ttsStop, ttsIsEnabled, ttsSetEnabled } from "@/lib/tts";
+import { CLASSES, RACAS, modAtributo } from "@/lib/lvs";
+import { DM_OPENING_PROMPT } from "@/lib/dm-prompt";
 import {
   audioInit,
   audioPlayMood,
@@ -15,16 +17,24 @@ import {
   audioSetMuted,
   audioSetVolume,
   audioGetVolume,
+  audioResumeIfBlocked,
   type Mood,
 } from "@/lib/audio";
-import { CLASSES, RACAS, modAtributo } from "@/lib/lvs";
-import { DM_OPENING_PROMPT } from "@/lib/dm-prompt";
 
 type Player = {
   id: string;
   display_name: string;
   user_id: string | null;
   last_seen_at: string;
+};
+
+type InventoryItem = {
+  id: string;
+  nome: string;
+  tipo: string;
+  desc?: string;
+  consumivel?: boolean;
+  qtd?: number;
 };
 
 type Character = {
@@ -47,6 +57,7 @@ type Character = {
   background: string | null;
   spells: { nome: string; nivel: number; efeito: string }[];
   features: string[];
+  inventory: InventoryItem[];
 };
 
 type Campaign = {
@@ -66,13 +77,9 @@ type LogEvent = {
   created_at: string;
 };
 
-const SCROLL_BOTTOM_DELAY = 80;
+const SCROLL_DELAY = 80;
 
-export default function SalaPage({
-  params,
-}: {
-  params: Promise<{ code: string }>;
-}) {
+export default function SalaPage({ params }: { params: Promise<{ code: string }> }) {
   const { code } = use(params);
   const router = useRouter();
 
@@ -83,6 +90,7 @@ export default function SalaPage({
   const [myChar, setMyChar] = useState<Character | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [log, setLog] = useState<LogEvent[]>([]);
+  const [currentTurnUserId, setCurrentTurnUserId] = useState<string | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -92,11 +100,11 @@ export default function SalaPage({
 
   const [ttsOn, setTtsOn] = useState(false);
   const [audioMuted, setAudioMuted] = useState(true);
-  const [audioVol, setAudioVol] = useState(0.4);
+  const [audioVol, setAudioVol] = useState(0.35);
   const [showFicha, setShowFicha] = useState(false);
   const [showDados, setShowDados] = useState(false);
   const [showAudioPanel, setShowAudioPanel] = useState(false);
-  const [pendingRoll, setPendingRoll] = useState<string | null>(null);
+  const [pendingRoll, setPendingRoll] = useState<{ raw: string; rolled: boolean } | null>(null);
 
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetting, setResetting] = useState(false);
@@ -104,11 +112,10 @@ export default function SalaPage({
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll log
   useEffect(() => {
     const t = setTimeout(() => {
       logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-    }, SCROLL_BOTTOM_DELAY);
+    }, SCROLL_DELAY);
     return () => clearTimeout(t);
   }, [log.length]);
 
@@ -117,29 +124,26 @@ export default function SalaPage({
     audioInit();
     setAudioMuted(audioIsMuted());
     setAudioVol(audioGetVolume());
+
+    // Tenta retomar audio em qualquer click do user (autoplay-bypass)
+    const onAnyClick = () => audioResumeIfBlocked();
+    document.addEventListener("click", onAnyClick);
+    return () => document.removeEventListener("click", onAnyClick);
   }, []);
 
-  // Carrega tudo
   useEffect(() => {
     const sb = getSupabase();
     let cancelled = false;
-    let unsubs: (() => void)[] = [];
+    const unsubs: (() => void)[] = [];
 
     (async () => {
       try {
-        const {
-          data: { user },
-        } = await sb.auth.getUser();
+        const { data: { user } } = await sb.auth.getUser();
         if (!user) {
           router.replace(`/login?next=${encodeURIComponent(`/sala/${code}`)}`);
           return;
         }
-
-        const { data: profile } = await sb
-          .from("profiles")
-          .select("*")
-          .eq("id", user.id)
-          .maybeSingle();
+        const { data: profile } = await sb.from("profiles").select("*").eq("id", user.id).maybeSingle();
         if (!profile) throw new Error("Perfil não encontrado.");
         if (cancelled) return;
         setMe(profile as Profile);
@@ -161,7 +165,6 @@ export default function SalaPage({
           .eq("campaign_id", camp.id)
           .eq("user_id", user.id)
           .maybeSingle();
-
         if (!existing) {
           const nick = (profile as Profile).nick || (profile as Profile).email.split("@")[0];
           await sb.from("players").insert({
@@ -171,20 +174,17 @@ export default function SalaPage({
             client_id: user.id,
           });
         } else {
-          await sb
-            .from("players")
-            .update({
-              last_seen_at: new Date().toISOString(),
-              display_name: (profile as Profile).nick || existing.display_name,
-            })
-            .eq("id", existing.id);
+          await sb.from("players").update({
+            last_seen_at: new Date().toISOString(),
+            display_name: (profile as Profile).nick || existing.display_name,
+          }).eq("id", existing.id);
         }
 
-        // Sessão atual (cria se não existe)
+        // Sessão
         let sId: string | null = null;
         const { data: existingSession } = await sb
           .from("sessions")
-          .select("id")
+          .select("id, current_turn_player_id")
           .eq("campaign_id", camp.id)
           .is("ended_at", null)
           .order("started_at", { ascending: false })
@@ -192,45 +192,23 @@ export default function SalaPage({
           .maybeSingle();
         if (existingSession) {
           sId = (existingSession as { id: string }).id;
+          // Pega current_turn (será carregado de novo no reload)
         } else {
-          // Cria nova sessão (só admin pode escrever em sessions, então tenta e ignora se falhar)
-          const { data: newSess, error: sessErr } = await sb
+          const { data: newSess } = await sb
             .from("sessions")
-            .insert({
-              campaign_id: camp.id,
-              session_number: 1,
-              music_mood: "tavern",
-            })
+            .insert({ campaign_id: camp.id, session_number: 1, music_mood: "tavern" })
             .select("id")
             .maybeSingle();
           if (newSess) sId = (newSess as { id: string }).id;
-          else if (sessErr) {
-            // Não-admin: provavelmente tem sessão mas não tá vendo. Tenta de novo sem filtro.
-            const { data: anySession } = await sb
-              .from("sessions")
-              .select("id")
-              .eq("campaign_id", camp.id)
-              .order("started_at", { ascending: false })
-              .limit(1)
-              .maybeSingle();
-            if (anySession) sId = (anySession as { id: string }).id;
-          }
         }
         if (cancelled) return;
         setSessionId(sId);
 
         const reloadAll = async () => {
-          const { data: list } = await sb
-            .from("players")
-            .select("id, display_name, user_id, last_seen_at")
-            .eq("campaign_id", camp.id)
-            .order("created_at", { ascending: true });
+          const { data: list } = await sb.from("players").select("id, display_name, user_id, last_seen_at").eq("campaign_id", camp.id).order("created_at", { ascending: true });
           if (!cancelled) setPlayers((list as Player[]) || []);
 
-          const { data: chars } = await sb
-            .from("characters")
-            .select("*")
-            .eq("campaign_id", camp.id);
+          const { data: chars } = await sb.from("characters").select("*").eq("campaign_id", camp.id);
           if (!cancelled) {
             const map: Record<string, Character> = {};
             for (const c of chars || []) map[c.user_id] = c as Character;
@@ -239,67 +217,57 @@ export default function SalaPage({
           }
 
           if (sId) {
-            const { data: events } = await sb
-              .from("combat_log")
-              .select("*")
-              .eq("session_id", sId as string)
-              .order("created_at", { ascending: true })
-              .limit(200);
+            const { data: events } = await sb.from("combat_log").select("*").eq("session_id", sId as string).order("created_at", { ascending: true }).limit(200);
             if (!cancelled) setLog((events as LogEvent[]) || []);
+
+            const { data: sess } = await sb.from("sessions").select("current_turn_player_id").eq("id", sId).maybeSingle();
+            if (!cancelled && sess) setCurrentTurnUserId((sess as { current_turn_player_id: string | null }).current_turn_player_id);
           }
         };
 
         await reloadAll();
 
-        // Realtime: players + combat_log
-        const ch1 = sb
-          .channel(`sala-players:${camp.id}`)
-          .on(
-            "postgres_changes",
-            { event: "*", schema: "public", table: "players", filter: `campaign_id=eq.${camp.id}` },
-            () => reloadAll()
-          )
-          .on(
-            "postgres_changes",
-            { event: "*", schema: "public", table: "characters", filter: `campaign_id=eq.${camp.id}` },
-            () => reloadAll()
-          )
-          .subscribe();
+        const ch1 = sb.channel(`sala-${camp.id}`).on(
+          "postgres_changes", { event: "*", schema: "public", table: "players", filter: `campaign_id=eq.${camp.id}` }, () => reloadAll()
+        ).on(
+          "postgres_changes", { event: "*", schema: "public", table: "characters", filter: `campaign_id=eq.${camp.id}` }, () => reloadAll()
+        ).subscribe();
         unsubs.push(() => sb.removeChannel(ch1));
 
         if (sId) {
-          const ch2 = sb
-            .channel(`sala-log:${sId}`)
-            .on(
-              "postgres_changes",
-              { event: "INSERT", schema: "public", table: "combat_log", filter: `session_id=eq.${sId}` },
-              (payload) => {
-                const ev = payload.new as LogEvent;
-                setLog((prev) => [...prev, ev]);
-                // TTS pra narrações
-                if (ev.actor_type === "dm" && ev.event_type === "narration" && ttsIsEnabled()) {
-                  const txt = (ev.payload.text as string) || "";
-                  ttsSpeak(txt);
-                }
-                // Captura ROLL pendente
-                const directives = (ev.payload as { directives?: { roll?: string; music_mood?: string } })?.directives;
-                if (ev.actor_type === "dm" && directives?.roll) {
-                  setPendingRoll(directives.roll);
-                }
-                // Música ambiente dirigida pelo Mestre
-                if (ev.actor_type === "dm" && directives?.music_mood) {
-                  const m = directives.music_mood as Mood;
-                  if (["tavern", "battle", "dungeon", "boss", "calm", "silence"].includes(m)) {
-                    audioPlayMood(m);
-                  }
+          const ch2 = sb.channel(`log-${sId}`).on(
+            "postgres_changes", { event: "INSERT", schema: "public", table: "combat_log", filter: `session_id=eq.${sId}` },
+            (payload) => {
+              const ev = payload.new as LogEvent;
+              setLog((prev) => [...prev, ev]);
+
+              // TTS automático em narrações
+              if (ev.actor_type === "dm" && ev.event_type === "narration" && ttsIsEnabled()) {
+                const txt = (ev.payload.text as string) || "";
+                ttsSpeak(txt);
+              }
+              const directives = (ev.payload as { directives?: { roll?: string; music_mood?: string } })?.directives;
+              if (ev.actor_type === "dm" && directives?.roll) {
+                setPendingRoll({ raw: directives.roll, rolled: false });
+              }
+              if (ev.actor_type === "dm" && directives?.music_mood) {
+                const m = directives.music_mood as Mood;
+                if (["tavern", "battle", "dungeon", "boss", "calm", "silence"].includes(m)) {
+                  audioPlayMood(m);
                 }
               }
-            )
-            .subscribe();
+            }
+          ).on(
+            "postgres_changes", { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sId}` },
+            (payload) => {
+              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string };
+              setCurrentTurnUserId(sess.current_turn_player_id);
+            }
+          ).subscribe();
           unsubs.push(() => sb.removeChannel(ch2));
         }
       } catch (e) {
-        const msg = e instanceof Error ? e.message : "Erro ao entrar na sala";
+        const msg = e instanceof Error ? e.message : "Erro";
         if (!cancelled) setError(msg);
       } finally {
         if (!cancelled) setLoading(false);
@@ -313,12 +281,15 @@ export default function SalaPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
 
-  async function logEvent(payload: {
-    actor_type: "player" | "npc" | "dm" | "system";
-    actor_id?: string | null;
-    event_type: string;
-    payload: Record<string, unknown>;
-  }) {
+  // Primeira vez que entra com música tocando ainda muteada: liga música depois do 1º click
+  useEffect(() => {
+    if (!audioMuted && !audioIsMuted()) {
+      // Se mood tá certo mas áudio parado, force replay
+      audioResumeIfBlocked();
+    }
+  }, [audioMuted]);
+
+  async function logEvent(payload: { actor_type: "player" | "npc" | "dm" | "system"; actor_id?: string | null; event_type: string; payload: Record<string, unknown> }) {
     if (!sessionId) return;
     const sb = getSupabase();
     await sb.from("combat_log").insert({
@@ -330,11 +301,21 @@ export default function SalaPage({
     });
   }
 
+  async function setTurnoProximo() {
+    if (!sessionId || players.length === 0) return;
+    const playersComUserId = players.filter((p) => p.user_id);
+    if (playersComUserId.length === 0) return;
+    const idxAtual = playersComUserId.findIndex((p) => p.user_id === currentTurnUserId);
+    const proxIdx = idxAtual === -1 ? 0 : (idxAtual + 1) % playersComUserId.length;
+    const proxUserId = playersComUserId[proxIdx].user_id;
+    const sb = getSupabase();
+    await sb.from("sessions").update({ current_turn_player_id: proxUserId }).eq("id", sessionId);
+  }
+
   async function chamarDM(prompt: string, isOpening = false) {
     if (!campaign || !sessionId || aguardandoIA) return;
     setAguardandoIA(true);
 
-    // Loga ação do player primeiro (exceto opening)
     if (!isOpening) {
       await logEvent({
         actor_type: "player",
@@ -343,49 +324,35 @@ export default function SalaPage({
       });
     }
 
-    // Monta histórico das últimas N mensagens pra mandar pra IA
     const sb = getSupabase();
-    const { data: recent } = await sb
-      .from("combat_log")
-      .select("*")
-      .eq("session_id", sessionId)
-      .order("created_at", { ascending: false })
-      .limit(20);
+    const { data: recent } = await sb.from("combat_log").select("*").eq("session_id", sessionId).order("created_at", { ascending: false }).limit(15);
 
     const messages = ((recent as LogEvent[]) || [])
       .reverse()
       .filter((e) => ["narration", "speak", "roll"].includes(e.event_type))
       .map((e) => ({
         role: e.actor_type === "dm" ? ("assistant" as const) : ("user" as const),
-        content:
-          e.actor_type === "dm"
-            ? (e.payload.text as string) || ""
-            : `[${e.payload.nick || "viajante"}]: ${(e.payload.text as string) || JSON.stringify(e.payload)}`,
+        content: e.actor_type === "dm"
+          ? (e.payload.text as string) || ""
+          : `[${e.payload.nick || "viajante"}]: ${(e.payload.text as string) || JSON.stringify(e.payload)}`,
       }));
 
     if (isOpening) {
       messages.push({ role: "user", content: prompt });
     } else if (messages.length === 0 || messages[messages.length - 1]?.role !== "user") {
-      messages.push({
-        role: "user",
-        content: `[${me?.nick || "viajante"}]: ${prompt}`,
-      });
+      messages.push({ role: "user", content: `[${me?.nick || "viajante"}]: ${prompt}` });
     }
 
-    // Contexto
     const playerCtx = players.map((p) => {
       const ch = characters[p.user_id || ""] || null;
       return {
         nick: p.display_name,
-        character: ch
-          ? {
-              name: ch.name,
-              race: RACAS.find((r) => r.key === ch.race)?.nome || ch.race,
-              class: CLASSES.find((c) => c.key === ch.class)?.nome || ch.class,
-              hp: ch.hp_current,
-              hp_max: ch.hp_max,
-            }
-          : undefined,
+        character: ch ? {
+          name: ch.name,
+          race: RACAS.find((r) => r.key === ch.race)?.nome || ch.race,
+          class: CLASSES.find((c) => c.key === ch.class)?.nome || ch.class,
+          hp: ch.hp_current, hp_max: ch.hp_max,
+        } : undefined,
       };
     });
 
@@ -404,9 +371,8 @@ export default function SalaPage({
         }),
       });
       const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Mestre IA fora do ar");
+      if (!r.ok) throw new Error(data.error || "Mestre fora");
 
-      // Limpa marcadores do texto pra exibir limpo
       const textLimpo = (data.text as string)
         .replace(/\[ROLL:[^\]]+\]/gi, "")
         .replace(/\[COMBATE INICIA\]/gi, "")
@@ -416,8 +382,13 @@ export default function SalaPage({
       await logEvent({
         actor_type: "dm",
         event_type: "narration",
-        payload: { text: textLimpo, directives: data.directives },
+        payload: { text: textLimpo, directives: data.directives, provider: data.provider },
       });
+
+      // Avança turno automaticamente após resposta da IA (se não pediu roll)
+      if (!isOpening && !data.directives?.roll) {
+        await setTurnoProximo();
+      }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Erro";
       await logEvent({
@@ -438,12 +409,14 @@ export default function SalaPage({
       event_type: "roll",
       payload: {
         nick: me?.nick || "viajante",
-        text: contexto ? `${contexto}: ${expr} → ${r.total}${r.critical ? " ⚜ CRÍTICO" : r.fumble ? " ☠ falha crítica" : ""}` : `${expr} → ${r.total}`,
+        text: contexto
+          ? `${contexto}: ${expr} → ${r.total}${r.critical ? " ⚜ CRÍTICO" : r.fumble ? " ☠ falha crítica" : ""}`
+          : `${expr} → ${r.total}`,
         result: r,
       },
     });
     setShowDados(false);
-    setPendingRoll(null);
+    if (pendingRoll) setPendingRoll({ ...pendingRoll, rolled: true });
   }
 
   function rolarComMod(expr: string, modKey?: "for" | "des" | "con" | "int" | "sab" | "car") {
@@ -457,18 +430,51 @@ export default function SalaPage({
     }
   }
 
+  async function usarItem(item: InventoryItem) {
+    if (!myChar || !item.consumivel) return;
+    const sb = getSupabase();
+    // Loga o uso
+    await logEvent({
+      actor_type: "player",
+      event_type: "speak",
+      payload: { text: `Usa: ${item.nome} — ${item.desc || ""}`, nick: me?.nick || "viajante" },
+    });
+    // Remove do inventário
+    const novoInventario = myChar.inventory.filter((i) => i.id !== item.id);
+    await sb.from("characters").update({ inventory: novoInventario }).eq("id", myChar.id);
+    // Cura instantânea pra poção de cura
+    if (item.id === "pocao-cura") {
+      const cura = 6 + Math.floor(Math.random() * 5) + Math.floor(Math.random() * 5);
+      const novoHP = Math.min(myChar.hp_max, myChar.hp_current + cura);
+      await sb.from("characters").update({ hp_current: novoHP }).eq("id", myChar.id);
+      await logEvent({
+        actor_type: "system",
+        event_type: "heal",
+        payload: { text: `${myChar.name} curou ${cura} HP (${myChar.hp_current} → ${novoHP})` },
+      });
+    }
+  }
+
   async function enviarAcao(e?: React.FormEvent) {
     e?.preventDefault();
     const txt = acaoTexto.trim();
     if (!txt || aguardandoIA) return;
+    if (!ehMeuTurno) return;
     setAcaoTexto("");
     await chamarDM(txt);
   }
 
   async function abrirCenaInicial() {
     if (!sessionId || aguardandoIA) return;
-    // Primeira chamada do mestre — opening
     await chamarDM(DM_OPENING_PROMPT, true);
+    // Define primeiro turno = primeiro jogador
+    if (players.length > 0) {
+      const sb = getSupabase();
+      const primeiro = players.find((p) => p.user_id);
+      if (primeiro) {
+        await sb.from("sessions").update({ current_turn_player_id: primeiro.user_id }).eq("id", sessionId);
+      }
+    }
   }
 
   async function logout() {
@@ -488,8 +494,7 @@ export default function SalaPage({
       setResetConfirm("");
       window.location.reload();
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Erro";
-      setError(msg);
+      setError(e instanceof Error ? e.message : "Erro");
     } finally {
       setResetting(false);
     }
@@ -507,7 +512,7 @@ export default function SalaPage({
     setAudioMuted(novo);
     audioSetMuted(novo);
     if (novo) audioStop();
-    else audioPlayMood("tavern"); // padrão ao destrancar
+    else audioPlayMood("tavern");
   }
 
   function setVolume(v: number) {
@@ -515,145 +520,91 @@ export default function SalaPage({
     audioSetVolume(v);
   }
 
+  function replayUltimaNarracao() {
+    const ultimas = log.filter((e) => e.actor_type === "dm" && e.event_type === "narration");
+    const ultima = ultimas[ultimas.length - 1];
+    if (ultima) {
+      ttsSpeak((ultima.payload.text as string) || "", { force: true });
+    }
+  }
+
+  function replayNarracao(text: string) {
+    ttsSpeak(text, { force: true });
+  }
+
   if (loading) {
-    return (
-      <main className="flex-1 flex items-center justify-center pergaminho-texture">
-        <p className="text-[var(--color-pergaminho-velho)] italic">Convocando os antigos…</p>
-      </main>
-    );
+    return <main className="flex-1 flex items-center justify-center pergaminho-texture">
+      <p className="text-[var(--color-pergaminho-velho)] italic">Convocando os antigos…</p>
+    </main>;
   }
 
   if (error) {
-    return (
-      <main className="flex-1 flex flex-col items-center justify-center px-6 pergaminho-texture text-center">
-        <h2 className="text-3xl text-[var(--color-sangue)] mb-4">Pergaminho rasgado</h2>
-        <p className="text-[var(--color-pergaminho)] mb-8 max-w-md">{error}</p>
-        <Link href="/">
-          <button className="btn-selo">Voltar ao Reino</button>
-        </Link>
-      </main>
-    );
+    return <main className="flex-1 flex flex-col items-center justify-center px-6 pergaminho-texture text-center">
+      <h2 className="text-3xl text-[var(--color-sangue)] mb-4">Pergaminho rasgado</h2>
+      <p className="text-[var(--color-pergaminho)] mb-8 max-w-md">{error}</p>
+      <Link href="/"><button className="btn-selo">Voltar ao Reino</button></Link>
+    </main>;
   }
 
-  // Sem personagem: tela de criação
   if (!myChar) {
     return (
       <main className="relative min-h-screen px-6 py-8 pergaminho-texture">
         <header className="max-w-5xl mx-auto flex items-center justify-between mb-8">
-          <Link href="/" className="text-xs uppercase tracking-[0.4em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
-            ← La Vierta
-          </Link>
+          <Link href="/" className="text-xs uppercase tracking-[0.4em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">← La Vierta</Link>
           <div className="flex items-center gap-4 text-sm">
             <Link href="/conta" className="text-[var(--color-pergaminho)] hover:text-[var(--color-dourado)]">
               <span className="text-[var(--color-dourado)]">{me?.nick}</span>
               {me?.role === "admin" && <span className="ml-1 text-xs text-[var(--color-sangue)]">⚜</span>}
             </Link>
-            <button onClick={logout} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xs uppercase tracking-widest">
-              Sair
-            </button>
+            <button onClick={logout} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xs uppercase tracking-widest">Sair</button>
           </div>
         </header>
-
         <div className="max-w-2xl mx-auto epico-entrada text-center">
-          <p className="text-xs uppercase tracking-[0.4em] text-[var(--color-pergaminho-velho)] mb-2">
-            Sala · {campaign?.code}
-          </p>
-          <h1 className="text-4xl md:text-5xl text-[var(--color-dourado-claro)] dourado-glow mb-4">
-            {campaign?.name}
-          </h1>
+          <p className="text-xs uppercase tracking-[0.4em] text-[var(--color-pergaminho-velho)] mb-2">Sala · {campaign?.code}</p>
+          <h1 className="text-4xl md:text-5xl text-[var(--color-dourado-claro)] dourado-glow mb-4">{campaign?.name}</h1>
           <div className="w-24 h-px mx-auto bg-gradient-to-r from-transparent via-[var(--color-dourado)] to-transparent mb-8" />
-
           <p className="text-[var(--color-pergaminho)] italic mb-12">{campaign?.lore_intro}</p>
-
           <div className="bg-[var(--color-vinho)]/20 border border-[var(--color-dourado)]/40 rounded-lg p-8 mb-8">
-            <h2 className="text-2xl text-[var(--color-dourado)] mb-3 font-[family-name:var(--font-cinzel)]">
-              Tu ainda não tens forma neste reino
-            </h2>
+            <h2 className="text-2xl text-[var(--color-dourado)] mb-3 font-[family-name:var(--font-cinzel)]">Tu ainda não tens forma</h2>
             <p className="text-sm text-[var(--color-pergaminho)] mb-6">
               Antes de cruzar o portão da aventura, precisas escolher tua linhagem, classe e história.
             </p>
-            <Link href={`/sala/${code}/personagem`}>
-              <button className="btn-selo">Forjar viajante</button>
-            </Link>
+            <Link href={`/sala/${code}/personagem`}><button className="btn-selo">Forjar viajante</button></Link>
           </div>
-
-          {players.length > 0 && (
-            <section className="text-left">
-              <h3 className="text-sm uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3">
-                Outros já chegaram
-              </h3>
-              <ul className="space-y-2">
-                {players.map((p) => {
-                  const ch = characters[p.user_id || ""];
-                  return (
-                    <li key={p.id} className="flex items-center gap-3 text-sm">
-                      <span className="w-2 h-2 rounded-full bg-[var(--color-floresta)] brasa" />
-                      <span className="text-[var(--color-pergaminho)]">
-                        {p.display_name}
-                        {ch && <span className="text-[var(--color-pergaminho-velho)] ml-2">— {ch.name}</span>}
-                        {!ch && <span className="text-[var(--color-pedra)] italic ml-2">aguardando forma</span>}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            </section>
-          )}
         </div>
       </main>
     );
   }
 
-  // Sala completa (com personagem)
   const isAdmin = me?.role === "admin";
+  const ehMeuTurno = !currentTurnUserId || currentTurnUserId === me?.id;
 
   return (
     <main className="min-h-screen pergaminho-texture flex flex-col">
-      {/* Header */}
       <header className="border-b border-[var(--color-pergaminho-velho)]/20 px-4 py-3 flex items-center justify-between gap-3">
-        <Link href="/" className="text-xs uppercase tracking-[0.3em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
-          ← La Vierta
-        </Link>
+        <Link href="/" className="text-xs uppercase tracking-[0.3em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">← La Vierta</Link>
         <div className="flex-1 text-center">
           <span className="text-xs uppercase tracking-widest text-[var(--color-pedra)]">
             {campaign?.name} · Cap. {campaign?.current_chapter}
           </span>
         </div>
         <div className="flex items-center gap-3 text-sm">
-          <button
-            onClick={toggleTTS}
-            className={`text-xs uppercase tracking-widest transition ${
-              ttsOn ? "text-[var(--color-dourado)]" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"
-            }`}
-            title="Voz do mestre"
-          >
-            {ttsOn ? "🔊" : "🔇"} Voz
+          <button onClick={toggleTTS} title="Voz do mestre"
+            className={`text-xs uppercase tracking-widest transition ${ttsOn ? "text-[var(--color-dourado)]" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>
+            {ttsOn ? "🔊" : "🔇"}
           </button>
+          <button onClick={replayUltimaNarracao} title="Repetir última narração"
+            className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">↻</button>
           <div className="relative">
-            <button
-              onClick={() => setShowAudioPanel((s) => !s)}
-              className={`text-xs uppercase tracking-widest transition ${
-                !audioMuted ? "text-[var(--color-dourado)]" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"
-              }`}
-              title="Música ambiente"
-            >
-              ♪
-            </button>
+            <button onClick={() => setShowAudioPanel((s) => !s)} title="Música"
+              className={`text-xs uppercase tracking-widest transition ${!audioMuted ? "text-[var(--color-dourado)]" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>♪</button>
             {showAudioPanel && (
-              <div className="absolute right-0 top-full mt-2 w-48 bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/40 rounded-lg p-3 z-30">
-                <button onClick={toggleAudio} className="w-full text-left text-xs text-[var(--color-pergaminho)] mb-2 hover:text-[var(--color-dourado)]">
+              <div className="absolute right-0 top-full mt-2 w-56 bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/40 rounded-lg p-3 z-30">
+                <button onClick={toggleAudio} className="w-full text-left text-xs text-[var(--color-pergaminho)] mb-3 hover:text-[var(--color-dourado)]">
                   {audioMuted ? "▶ Tocar música" : "⏸ Silenciar"}
                 </button>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.05"
-                  value={audioVol}
-                  onChange={(e) => setVolume(parseFloat(e.target.value))}
-                  className="w-full"
-                />
-                <p className="text-[10px] text-[var(--color-pedra)] mt-2">A música muda conforme a cena.</p>
+                <input type="range" min="0" max="1" step="0.05" value={audioVol} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-full" />
+                <p className="text-[10px] text-[var(--color-pedra)] mt-2">A trilha muda conforme a cena.</p>
               </div>
             )}
           </div>
@@ -661,33 +612,35 @@ export default function SalaPage({
             <span className="text-[var(--color-dourado)]">{me?.nick}</span>
             {isAdmin && <span className="ml-1 text-xs text-[var(--color-sangue)]">⚜</span>}
           </Link>
-          <button onClick={logout} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xs uppercase tracking-widest">
-            Sair
-          </button>
+          <button onClick={logout} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xs uppercase tracking-widest">Sair</button>
         </div>
       </header>
 
       <div className="flex-1 flex flex-col lg:flex-row max-w-7xl w-full mx-auto">
-        {/* COLUNA ESQUERDA: Liga */}
+        {/* Liga */}
         <aside className="lg:w-56 border-b lg:border-b-0 lg:border-r border-[var(--color-pergaminho-velho)]/20 p-4">
-          <h2 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3">
-            Liga
-          </h2>
+          <h2 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3">Liga</h2>
           <ul className="space-y-2">
             {players.map((p) => {
               const ch = characters[p.user_id || ""];
               const isMe = p.user_id === me?.id;
+              const ehTurnoDele = currentTurnUserId === p.user_id;
               return (
-                <li key={p.id} className={`flex items-center gap-2 px-2 py-1.5 rounded ${isMe ? "bg-[var(--color-vinho)]/20 border border-[var(--color-dourado)]/30" : ""}`}>
+                <li key={p.id} className={`flex items-center gap-2 px-2 py-1.5 rounded transition ${
+                  isMe ? "bg-[var(--color-vinho)]/20 border border-[var(--color-dourado)]/30" : ""
+                } ${ehTurnoDele ? "ring-2 ring-[var(--color-dourado)]/60" : ""}`}>
                   {ch?.portrait_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
+                    /* eslint-disable-next-line @next/next/no-img-element */
                     <img src={ch.portrait_url} alt={ch.name} className="w-8 h-8 rounded-full object-cover border border-[var(--color-dourado)]/40" />
                   ) : (
-                    <span className="w-8 h-8 rounded-full bg-[var(--color-pedra)]/40 flex items-center justify-center text-xs text-[var(--color-pergaminho-velho)]">{(ch?.name || p.display_name).slice(0, 1).toUpperCase()}</span>
+                    <span className="w-8 h-8 rounded-full bg-[var(--color-pedra)]/40 flex items-center justify-center text-xs text-[var(--color-pergaminho-velho)]">
+                      {(ch?.name || p.display_name).slice(0, 1).toUpperCase()}
+                    </span>
                   )}
                   <div className="flex-1 min-w-0">
-                    <div className="text-sm text-[var(--color-pergaminho)] truncate">
+                    <div className="text-sm text-[var(--color-pergaminho)] truncate flex items-center gap-1">
                       {ch?.name || p.display_name}
+                      {ehTurnoDele && <span className="text-[var(--color-dourado)] text-[10px]">▸</span>}
                     </div>
                     {ch && (
                       <div className="text-[10px] text-[var(--color-pergaminho-velho)] uppercase tracking-wider">
@@ -695,29 +648,25 @@ export default function SalaPage({
                       </div>
                     )}
                   </div>
-                  {ch && (
-                    <div className="text-[10px] text-[var(--color-sangue)]">
-                      {ch.hp_current}/{ch.hp_max}
-                    </div>
-                  )}
+                  {ch && <div className="text-[10px] text-[var(--color-sangue)]">{ch.hp_current}/{ch.hp_max}</div>}
                 </li>
               );
             })}
           </ul>
 
           {isAdmin && (
-            <div className="mt-6 pt-4 border-t border-[var(--color-pergaminho-velho)]/20">
-              <button
-                onClick={() => setShowResetModal(true)}
-                className="text-xs text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)] uppercase tracking-widest"
-              >
+            <div className="mt-6 pt-4 border-t border-[var(--color-pergaminho-velho)]/20 space-y-2">
+              <button onClick={setTurnoProximo} className="text-xs text-[var(--color-dourado)] hover:text-[var(--color-dourado-claro)] uppercase tracking-widest block">
+                ▸ Passar turno
+              </button>
+              <button onClick={() => setShowResetModal(true)} className="text-xs text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)] uppercase tracking-widest block">
                 ⚜ Resetar campanha
               </button>
             </div>
           )}
         </aside>
 
-        {/* COLUNA CENTRAL: Log narrativo */}
+        {/* Log */}
         <section className="flex-1 flex flex-col min-h-[60vh] max-h-[calc(100vh-120px)] lg:max-h-[calc(100vh-60px)]">
           <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
             {log.length === 0 && (
@@ -726,18 +675,14 @@ export default function SalaPage({
                   A campanha ainda não começou. {isAdmin ? "Clica abaixo pra abrir a cena inicial." : "Aguardando o admin abrir a cena…"}
                 </p>
                 {isAdmin && (
-                  <button
-                    onClick={abrirCenaInicial}
-                    disabled={aguardandoIA}
-                    className="btn-selo disabled:opacity-50"
-                  >
+                  <button onClick={abrirCenaInicial} disabled={aguardandoIA} className="btn-selo disabled:opacity-50">
                     {aguardandoIA ? "Mestre invocando…" : "Abrir cena inicial"}
                   </button>
                 )}
               </div>
             )}
             {log.map((ev) => (
-              <LogEntry key={ev.id} ev={ev} characters={characters} myUserId={me?.id} />
+              <LogEntry key={ev.id} ev={ev} myUserId={me?.id} onReplay={replayNarracao} />
             ))}
             {aguardandoIA && (
               <div className="text-[var(--color-dourado)] italic text-sm flex items-center gap-2">
@@ -747,53 +692,40 @@ export default function SalaPage({
             <div ref={logEndRef} />
           </div>
 
-          {/* Input de ação */}
+          {/* Input */}
           <form onSubmit={enviarAcao} className="border-t border-[var(--color-pergaminho-velho)]/20 p-3 flex gap-2 bg-[var(--color-carvao)]/40">
-            <button
-              type="button"
-              onClick={() => setShowDados(true)}
-              className="px-3 py-2 rounded border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-dourado)] text-sm hover:border-[var(--color-dourado)] flex-shrink-0"
-              title="Rolar dados"
-            >
+            <button type="button" onClick={() => setShowDados(true)} title="Rolar dados"
+              className="px-3 py-2 rounded border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-dourado)] text-sm hover:border-[var(--color-dourado)] flex-shrink-0">
               🎲
             </button>
-            {pendingRoll && (
-              <button
-                type="button"
-                onClick={() => rolarComMod("1d20")}
-                className="px-3 py-2 rounded bg-[var(--color-dourado)]/30 border border-[var(--color-dourado)] text-[var(--color-dourado-claro)] text-xs uppercase tracking-widest hover:bg-[var(--color-dourado)]/50 flex-shrink-0"
-              >
-                Rolar: {pendingRoll}
+            {pendingRoll && !pendingRoll.rolled && ehMeuTurno && (
+              <button type="button" onClick={() => rolarComMod("1d20")}
+                className="px-3 py-2 rounded bg-[var(--color-dourado)]/30 border border-[var(--color-dourado)] text-[var(--color-dourado-claro)] text-xs uppercase tracking-widest hover:bg-[var(--color-dourado)]/50 flex-shrink-0">
+                Rolar: {pendingRoll.raw}
               </button>
             )}
             <input
               type="text"
               value={acaoTexto}
               onChange={(e) => setAcaoTexto(e.target.value)}
-              placeholder="Descreve tua ação ou fala…"
-              disabled={aguardandoIA}
-              className="flex-1 px-3 py-2 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-dourado)] text-sm"
+              placeholder={ehMeuTurno ? "Tua vez. Descreve a ação…" : `Aguardando ${players.find((p) => p.user_id === currentTurnUserId)?.display_name || "outro jogador"}…`}
+              disabled={aguardandoIA || !ehMeuTurno}
+              className="flex-1 px-3 py-2 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-dourado)] text-sm disabled:opacity-50"
             />
-            <button
-              type="submit"
-              disabled={!acaoTexto.trim() || aguardandoIA}
-              className="px-4 py-2 rounded bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest hover:bg-[var(--color-sangue)] disabled:opacity-40 flex-shrink-0"
-            >
+            <button type="submit" disabled={!acaoTexto.trim() || aguardandoIA || !ehMeuTurno}
+              className="px-4 py-2 rounded bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest hover:bg-[var(--color-sangue)] disabled:opacity-40 flex-shrink-0">
               Falar
             </button>
           </form>
         </section>
 
-        {/* COLUNA DIREITA: Ficha */}
+        {/* Ficha */}
         <aside className="lg:w-72 border-t lg:border-t-0 lg:border-l border-[var(--color-pergaminho-velho)]/20 p-4 overflow-y-auto">
-          <button
-            onClick={() => setShowFicha((s) => !s)}
-            className="lg:hidden text-xs uppercase tracking-widest text-[var(--color-dourado)] mb-3"
-          >
+          <button onClick={() => setShowFicha((s) => !s)} className="lg:hidden text-xs uppercase tracking-widest text-[var(--color-dourado)] mb-3">
             {showFicha ? "▲" : "▼"} Ficha
           </button>
           <div className={`${showFicha ? "block" : "hidden"} lg:block`}>
-            <Ficha char={myChar} />
+            <Ficha char={myChar} onUsarItem={usarItem} />
           </div>
         </aside>
       </div>
@@ -805,35 +737,22 @@ export default function SalaPage({
             <h2 className="text-xl text-[var(--color-dourado)] mb-4 font-[family-name:var(--font-cinzel)]">Rolar dados</h2>
             <div className="grid grid-cols-4 gap-2 mb-4">
               {DADOS_PADRAO.map((d) => (
-                <button
-                  key={d.label}
-                  onClick={() => rolarDado(d.expr)}
-                  className="px-3 py-2 rounded border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] hover:border-[var(--color-dourado)] hover:text-[var(--color-dourado)]"
-                >
+                <button key={d.label} onClick={() => rolarDado(d.expr)}
+                  className="px-3 py-2 rounded border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] hover:border-[var(--color-dourado)] hover:text-[var(--color-dourado)]">
                   {d.label}
                 </button>
               ))}
             </div>
-            {myChar && (
-              <>
-                <p className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-2">d20 + atributo</p>
-                <div className="grid grid-cols-3 gap-2 mb-4">
-                  {(["for", "des", "con", "int", "sab", "car"] as const).map((k) => (
-                    <button
-                      key={k}
-                      onClick={() => rolarComMod("1d20", k)}
-                      className="px-2 py-1.5 rounded border border-[var(--color-pergaminho-velho)]/40 text-xs text-[var(--color-pergaminho)] hover:border-[var(--color-dourado)]"
-                    >
-                      {k.toUpperCase()} ({modAtributo(myChar[`${k}_attr` as const]) >= 0 ? "+" : ""}
-                      {modAtributo(myChar[`${k}_attr` as const])})
-                    </button>
-                  ))}
-                </div>
-              </>
-            )}
-            <button onClick={() => setShowDados(false)} className="btn-selo-secundario w-full text-xs">
-              Fechar
-            </button>
+            <p className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-2">d20 + atributo</p>
+            <div className="grid grid-cols-3 gap-2 mb-4">
+              {(["for", "des", "con", "int", "sab", "car"] as const).map((k) => (
+                <button key={k} onClick={() => rolarComMod("1d20", k)}
+                  className="px-2 py-1.5 rounded border border-[var(--color-pergaminho-velho)]/40 text-xs text-[var(--color-pergaminho)] hover:border-[var(--color-dourado)]">
+                  {k.toUpperCase()} ({modAtributo(myChar[`${k}_attr` as const]) >= 0 ? "+" : ""}{modAtributo(myChar[`${k}_attr` as const])})
+                </button>
+              ))}
+            </div>
+            <button onClick={() => setShowDados(false)} className="btn-selo-secundario w-full text-xs">Fechar</button>
           </div>
         </div>
       )}
@@ -842,38 +761,20 @@ export default function SalaPage({
       {showResetModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-6">
           <div className="bg-[var(--color-carvao)] border border-[var(--color-sangue)] rounded-lg p-8 max-w-md w-full">
-            <h2 className="text-2xl text-[var(--color-sangue)] mb-4 font-[family-name:var(--font-cinzel)]">
-              Resetar campanha?
-            </h2>
+            <h2 className="text-2xl text-[var(--color-sangue)] mb-4 font-[family-name:var(--font-cinzel)]">Resetar campanha?</h2>
             <p className="text-[var(--color-pergaminho)] text-sm mb-4">
-              Apaga personagens, sessões, NPCs, locais, quests, memórias. Os jogadores continuam, mas começam do zero.
+              Apaga personagens, sessões, NPCs, locais, quests, memórias.
             </p>
             <p className="text-[var(--color-pergaminho-velho)] text-xs mb-2">
               Digita <code className="text-[var(--color-sangue)]">RESETAR</code>:
             </p>
-            <input
-              type="text"
-              value={resetConfirm}
-              onChange={(e) => setResetConfirm(e.target.value)}
-              className="w-full px-3 py-2 rounded bg-[var(--color-carvao)] border border-[var(--color-sangue)]/50 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-sangue)]"
-              autoFocus
-            />
+            <input type="text" value={resetConfirm} onChange={(e) => setResetConfirm(e.target.value)}
+              className="w-full px-3 py-2 rounded bg-[var(--color-carvao)] border border-[var(--color-sangue)]/50 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-sangue)]" autoFocus />
             <div className="mt-6 flex gap-3">
-              <button
-                onClick={() => {
-                  setShowResetModal(false);
-                  setResetConfirm("");
-                }}
-                disabled={resetting}
-                className="flex-1 px-4 py-2 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] rounded text-xs uppercase tracking-widest"
-              >
-                Cancelar
-              </button>
-              <button
-                onClick={resetar}
-                disabled={resetting || resetConfirm !== "RESETAR"}
-                className="flex-1 px-4 py-2 bg-[var(--color-sangue)] text-[var(--color-pergaminho)] rounded text-xs uppercase tracking-widest disabled:opacity-40"
-              >
+              <button onClick={() => { setShowResetModal(false); setResetConfirm(""); }} disabled={resetting}
+                className="flex-1 px-4 py-2 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] rounded text-xs uppercase tracking-widest">Cancelar</button>
+              <button onClick={resetar} disabled={resetting || resetConfirm !== "RESETAR"}
+                className="flex-1 px-4 py-2 bg-[var(--color-sangue)] text-[var(--color-pergaminho)] rounded text-xs uppercase tracking-widest disabled:opacity-40">
                 {resetting ? "Resetando…" : "Confirmar"}
               </button>
             </div>
@@ -884,29 +785,24 @@ export default function SalaPage({
   );
 }
 
-function LogEntry({
-  ev,
-  characters,
-  myUserId,
-}: {
-  ev: LogEvent;
-  characters: Record<string, Character>;
-  myUserId: string | undefined;
-}) {
+function LogEntry({ ev, myUserId, onReplay }: { ev: LogEvent; myUserId: string | undefined; onReplay: (text: string) => void }) {
   if (ev.actor_type === "dm") {
     const text = (ev.payload.text as string) || "";
+    const provider = (ev.payload.provider as string) || "";
     return (
-      <div className="border-l-2 border-[var(--color-dourado)] pl-4 py-1">
-        <p className="text-xs uppercase tracking-widest text-[var(--color-dourado)] mb-1">Mestre</p>
+      <div className="border-l-2 border-[var(--color-dourado)] pl-4 py-1 group">
+        <div className="flex items-baseline gap-2">
+          <p className="text-xs uppercase tracking-widest text-[var(--color-dourado)]">Mestre</p>
+          {provider && <span className="text-[9px] text-[var(--color-pedra)] uppercase">✦ {provider}</span>}
+          <button onClick={() => onReplay(text)} className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] opacity-0 group-hover:opacity-100 transition" title="Ouvir de novo">↻</button>
+        </div>
         <p className="text-[var(--color-pergaminho)] leading-relaxed whitespace-pre-wrap">{text}</p>
       </div>
     );
   }
   if (ev.actor_type === "system") {
     const text = (ev.payload.text as string) || "";
-    return (
-      <p className="text-xs italic text-[var(--color-pedra)] text-center">{text}</p>
-    );
+    return <p className="text-xs italic text-[var(--color-pedra)] text-center">{text}</p>;
   }
   if (ev.actor_type === "player") {
     const nick = (ev.payload.nick as string) || "viajante";
@@ -925,30 +821,24 @@ function LogEntry({
     return (
       <div className={`pl-4 py-1 ${isMe ? "border-l-2 border-[var(--color-vinho)]" : "border-l-2 border-[var(--color-pergaminho-velho)]/30"}`}>
         <p className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">{nick}</p>
-        <p className="text-[var(--color-pergaminho)] italic">"{text}"</p>
+        <p className="text-[var(--color-pergaminho)] italic">&quot;{text}&quot;</p>
       </div>
     );
   }
   return null;
 }
 
-function Ficha({ char }: { char: Character }) {
+function Ficha({ char, onUsarItem }: { char: Character; onUsarItem: (item: InventoryItem) => void }) {
   const raca = RACAS.find((r) => r.key === char.race);
   const classe = CLASSES.find((c) => c.key === char.class);
   return (
     <div className="space-y-4">
       {char.portrait_url && (
-        // eslint-disable-next-line @next/next/no-img-element
-        <img
-          src={char.portrait_url}
-          alt={char.name}
-          className="w-full aspect-square object-cover rounded-lg border border-[var(--color-dourado)]/40"
-        />
+        /* eslint-disable-next-line @next/next/no-img-element */
+        <img src={char.portrait_url} alt={char.name} className="w-full aspect-square object-cover rounded-lg border border-[var(--color-dourado)]/40" />
       )}
       <div>
-        <h3 className="text-xl text-[var(--color-dourado-claro)] dourado-glow font-[family-name:var(--font-cinzel)]">
-          {char.name}
-        </h3>
+        <h3 className="text-xl text-[var(--color-dourado-claro)] dourado-glow font-[family-name:var(--font-cinzel)]">{char.name}</h3>
         <p className="text-xs text-[var(--color-pergaminho-velho)] uppercase tracking-widest">
           {raca?.nome} · {classe?.nome} · Nível {char.level}
         </p>
@@ -957,15 +847,11 @@ function Ficha({ char }: { char: Character }) {
       <div className="grid grid-cols-2 gap-2 text-center">
         <div className="bg-[var(--color-carvao)]/60 border border-[var(--color-pergaminho-velho)]/30 rounded p-2">
           <div className="text-xs text-[var(--color-pergaminho-velho)] uppercase">HP</div>
-          <div className="text-lg text-[var(--color-sangue)] font-[family-name:var(--font-cinzel-decorative)]">
-            {char.hp_current}/{char.hp_max}
-          </div>
+          <div className="text-lg text-[var(--color-sangue)] font-[family-name:var(--font-cinzel-decorative)]">{char.hp_current}/{char.hp_max}</div>
         </div>
         <div className="bg-[var(--color-carvao)]/60 border border-[var(--color-pergaminho-velho)]/30 rounded p-2">
           <div className="text-xs text-[var(--color-pergaminho-velho)] uppercase">CA</div>
-          <div className="text-lg text-[var(--color-dourado)] font-[family-name:var(--font-cinzel-decorative)]">
-            {char.ac}
-          </div>
+          <div className="text-lg text-[var(--color-dourado)] font-[family-name:var(--font-cinzel-decorative)]">{char.ac}</div>
         </div>
       </div>
 
@@ -983,6 +869,27 @@ function Ficha({ char }: { char: Character }) {
         })}
       </div>
 
+      {char.inventory && char.inventory.length > 0 && (
+        <div>
+          <h4 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">Inventário</h4>
+          <ul className="space-y-1">
+            {char.inventory.map((item, i) => (
+              <li key={item.id || i} className="text-xs text-[var(--color-pergaminho)] flex items-start gap-2 bg-[var(--color-carvao)]/40 rounded p-1.5">
+                <div className="flex-1">
+                  <div className="text-[var(--color-dourado)]">{item.nome}</div>
+                  {item.desc && <div className="text-[10px] text-[var(--color-pergaminho-velho)] italic">{item.desc}</div>}
+                </div>
+                {item.consumivel && (
+                  <button onClick={() => onUsarItem(item)} className="text-[10px] uppercase tracking-widest text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)] px-2 py-0.5 border border-[var(--color-sangue)]/40 rounded">
+                    Usar
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {char.spells && char.spells.length > 0 && (
         <div>
           <h4 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">Magias</h4>
@@ -991,6 +898,7 @@ function Ficha({ char }: { char: Character }) {
               <li key={i} className="text-xs text-[var(--color-pergaminho)]">
                 <span className="text-[var(--color-dourado)]">{m.nome}</span>
                 <span className="text-[var(--color-pergaminho-velho)] ml-1">(N{m.nivel})</span>
+                {m.efeito && <div className="text-[10px] text-[var(--color-pergaminho-velho)] italic ml-2">{m.efeito}</div>}
               </li>
             ))}
           </ul>
@@ -1002,9 +910,7 @@ function Ficha({ char }: { char: Character }) {
           <h4 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">Habilidades</h4>
           <ul className="space-y-1">
             {char.features.map((f, i) => (
-              <li key={i} className="text-xs text-[var(--color-pergaminho)] italic">
-                · {f}
-              </li>
+              <li key={i} className="text-xs text-[var(--color-pergaminho)] italic">· {f}</li>
             ))}
           </ul>
         </div>
@@ -1013,7 +919,7 @@ function Ficha({ char }: { char: Character }) {
       {char.background && (
         <div>
           <h4 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">História</h4>
-          <p className="text-xs text-[var(--color-pergaminho)] italic">{char.background}</p>
+          <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>
         </div>
       )}
     </div>

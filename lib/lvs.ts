@@ -255,31 +255,47 @@ export function buildPollinationsUrl(prompt: string, seed: number = 0): string {
 }
 
 // Prompt base pra retrato de personagem
+export type SexoKey = "masculino" | "feminino" | "androgino";
+export const SEXOS: { key: SexoKey; nome: string; en: string }[] = [
+  { key: "masculino", nome: "Masculino", en: "male" },
+  { key: "feminino", nome: "Feminino", en: "female" },
+  { key: "androgino", nome: "Andrógino", en: "androgynous" },
+];
+
 export function promptRetrato(opts: {
   raca: RacaKey;
   classe: ClasseKey;
-  genero?: string;
-  detalhes?: string;
+  sexo?: SexoKey;
+  aparencia?: string;
 }): string {
-  const racaInfo = RACAS.find((r) => r.key === opts.raca);
-  const classeInfo = CLASSES.find((c) => c.key === opts.classe);
-  const genero = opts.genero || "fantasy character";
+  const sexoEn = opts.sexo ? SEXOS.find((s) => s.key === opts.sexo)?.en || "" : "";
   const racaEn = {
     humano: "human",
-    elfo: "wood elf",
-    anao: "dwarf",
+    elfo: "wood elf with pointed ears",
+    anao: "dwarf with thick beard",
     halfling: "halfling",
-    meio_orc: "half-orc",
-    tiefling: "tiefling with horns",
+    meio_orc: "half-orc with tusks",
+    tiefling: "tiefling with red skin and horns",
   }[opts.raca];
   const classeEn = {
-    guerreiro: "fighter in armor with sword",
-    mago: "wizard with robes and staff",
-    clerigo: "cleric with holy symbol",
-    ladino: "rogue with dagger and hood",
-    barbaro: "barbarian with axe",
-    bardo: "bard with lute",
+    guerreiro: "fighter wearing armor holding a sword",
+    mago: "wizard in dark robes holding a staff",
+    clerigo: "cleric with a holy symbol",
+    ladino: "rogue with hood and dagger",
+    barbaro: "barbarian with painted face holding an axe",
+    bardo: "bard with a lute",
   }[opts.classe];
 
-  return `Epic fantasy portrait of a ${genero} ${racaEn} ${classeEn}, oil painting, dramatic lighting, dungeons and dragons style, detailed face, painted by larry elmore, high quality`;
+  const detalhes = opts.aparencia?.trim() ? `, ${opts.aparencia.trim()}` : "";
+
+  return `Epic dark fantasy portrait of a ${sexoEn} ${racaEn} ${classeEn}${detalhes}, headshot, oil painting, dramatic candle lighting, dungeons and dragons concept art, detailed expressive face, painted by larry elmore wayne reynolds tyler jacobson, high quality, deep colors, atmospheric, no text, no watermark`;
 }
+
+// Perguntas pra gerar background com IA
+export const PERGUNTAS_HISTORICO = [
+  { key: "origem", label: "Onde teu personagem cresceu?", placeholder: "uma vila esquecida na Baixada Sombria, ou nas docas de Porto Freguesia…" },
+  { key: "estudou", label: "Estudou ou aprendeu o ofício como?", placeholder: "fugiu de casa cedo, aprendeu no Miguel-Couto, foi treinado por um velho mestre…" },
+  { key: "trauma", label: "Qual cicatriz carrega?", placeholder: "perdeu alguém, cometeu um crime, foi traído, é portador de algo…" },
+  { key: "motivacao", label: "O que busca em Vélreth?", placeholder: "vingança, redenção, fortuna, encontrar alguém perdido, fugir de algo…" },
+  { key: "medo", label: "Qual é o medo mais profundo?", placeholder: "voltar pra casa, ficar sozinho, perder o controle, o passado vir cobrar…" },
+];

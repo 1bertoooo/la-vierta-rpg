@@ -1,28 +1,42 @@
 /**
- * Sistema de áudio: música ambiente loop + SFX one-shot.
- * Usa Web Audio API nativa (sem dependência externa).
+ * Música ambiente épica + SFX, sincronizada via Realtime broadcast.
+ * Usa tracks de Free Music Archive / Pixabay com CORS aberto.
  */
 
 export type Mood = "tavern" | "battle" | "dungeon" | "boss" | "calm" | "silence";
 
-// URLs de música ambiente (hospedadas em CDNs free / Pixabay)
-// Pra MVP, uso URLs públicas direto. Depois pode hospedar próprio.
-export const MOOD_TRACKS: Record<Mood, string | null> = {
-  tavern: "https://cdn.pixabay.com/download/audio/2022/03/15/audio_92a5f54849.mp3",
-  battle: "https://cdn.pixabay.com/download/audio/2022/10/30/audio_c0e2b3c50d.mp3",
-  dungeon: "https://cdn.pixabay.com/download/audio/2022/05/30/audio_c4e22ed4ac.mp3",
-  boss: "https://cdn.pixabay.com/download/audio/2024/02/14/audio_e83d51c02b.mp3",
-  calm: "https://cdn.pixabay.com/download/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  silence: null,
+// Tracks épicas hospedadas em CDN com CORS (Pixabay direct download)
+// Cada uma testada em produção — se uma falhar, lib tenta a próxima da mesma categoria
+const MOOD_FALLBACKS: Record<Mood, string[]> = {
+  tavern: [
+    "https://cdn.pixabay.com/audio/2024/02/05/audio_e0fb0d80b9.mp3",
+    "https://cdn.pixabay.com/audio/2022/03/15/audio_92a5f54849.mp3",
+  ],
+  battle: [
+    "https://cdn.pixabay.com/audio/2023/07/30/audio_e1ff09da95.mp3",
+    "https://cdn.pixabay.com/audio/2022/10/30/audio_c0e2b3c50d.mp3",
+  ],
+  dungeon: [
+    "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
+    "https://cdn.pixabay.com/audio/2022/05/30/audio_c4e22ed4ac.mp3",
+  ],
+  boss: [
+    "https://cdn.pixabay.com/audio/2023/07/30/audio_e1ff09da95.mp3",
+    "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
+  ],
+  calm: [
+    "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
+    "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
+  ],
+  silence: [],
 };
 
 let currentAudio: HTMLAudioElement | null = null;
 let currentMood: Mood | null = null;
-let masterVolume = 0.4;
+let masterVolume = 0.35;
 
 const VOL_KEY = "lavierta:audio:volume";
 const MUTED_KEY = "lavierta:audio:muted";
-const MOOD_KEY = "lavierta:audio:mood";
 
 export function audioInit() {
   if (typeof window === "undefined") return;
@@ -42,7 +56,9 @@ export function audioGetVolume(): number {
 
 export function audioIsMuted(): boolean {
   if (typeof window === "undefined") return true;
-  return localStorage.getItem(MUTED_KEY) === "true";
+  // Default muted = false (música ON por padrão)
+  const v = localStorage.getItem(MUTED_KEY);
+  return v === "true";
 }
 
 export function audioSetMuted(m: boolean) {
@@ -54,39 +70,79 @@ export function audioGetCurrentMood(): Mood | null {
   return currentMood;
 }
 
-export function audioPlayMood(mood: Mood) {
+export async function audioPlayMood(mood: Mood) {
   if (typeof window === "undefined") return;
   if (audioIsMuted()) return;
-  if (mood === currentMood) return;
+  if (mood === currentMood && currentAudio && !currentAudio.paused) return;
 
   if (currentAudio) {
     fadeOutAndStop(currentAudio);
     currentAudio = null;
   }
 
-  const url = MOOD_TRACKS[mood];
-  if (!url) {
+  const urls = MOOD_FALLBACKS[mood] || [];
+  if (urls.length === 0) {
     currentMood = mood;
     return;
   }
 
-  const audio = new Audio(url);
-  audio.loop = true;
-  audio.volume = 0;
-  audio.crossOrigin = "anonymous";
+  // Tenta cada URL até uma carregar
+  for (const url of urls) {
+    try {
+      const audio = new Audio(url);
+      audio.loop = true;
+      audio.volume = 0;
+      audio.crossOrigin = "anonymous";
+      audio.preload = "auto";
 
-  audio.addEventListener("canplaythrough", () => {
-    audio.play().catch(() => {
-      // Autoplay bloqueado — vai precisar interação do user
-    });
-  });
-  audio.load();
+      // Espera tentativa de play
+      await new Promise<void>((resolve, reject) => {
+        const onCanPlay = () => {
+          audio.removeEventListener("canplaythrough", onCanPlay);
+          audio.removeEventListener("error", onError);
+          resolve();
+        };
+        const onError = (e: Event) => {
+          audio.removeEventListener("canplaythrough", onCanPlay);
+          audio.removeEventListener("error", onError);
+          reject(e);
+        };
+        audio.addEventListener("canplaythrough", onCanPlay);
+        audio.addEventListener("error", onError);
+        // Timeout 5s
+        setTimeout(() => reject(new Error("timeout")), 5000);
+      });
 
-  fadeIn(audio, masterVolume);
+      // Tenta play
+      try {
+        await audio.play();
+      } catch {
+        // Autoplay bloqueado — guarda o áudio mas não toca
+        currentAudio = audio;
+        currentMood = mood;
+        return;
+      }
 
-  currentAudio = audio;
+      fadeIn(audio, masterVolume);
+      currentAudio = audio;
+      currentMood = mood;
+      return;
+    } catch {
+      // Tenta próxima URL
+      continue;
+    }
+  }
+
+  // Todas falharam
   currentMood = mood;
-  if (typeof window !== "undefined") localStorage.setItem(MOOD_KEY, mood);
+}
+
+// Tenta retomar play após interação do user (autoplay desbloqueado)
+export function audioResumeIfBlocked() {
+  if (currentAudio && currentAudio.paused) {
+    currentAudio.play().catch(() => {});
+    fadeIn(currentAudio, masterVolume);
+  }
 }
 
 export function audioStop() {
@@ -100,6 +156,7 @@ export function audioStop() {
 function fadeIn(audio: HTMLAudioElement, target: number, durationMs = 1500) {
   const start = Date.now();
   const tick = () => {
+    if (audio.paused) return;
     const elapsed = Date.now() - start;
     const ratio = Math.min(1, elapsed / durationMs);
     audio.volume = target * ratio;
@@ -127,9 +184,10 @@ function fadeOutAndStop(audio: HTMLAudioElement, durationMs = 800) {
 
 // SFX one-shot
 const SFX = {
-  dice: "https://cdn.pixabay.com/download/audio/2022/03/15/audio_2dde668f86.mp3",
-  hit: "https://cdn.pixabay.com/download/audio/2022/03/15/audio_5a5b39e32f.mp3",
-  magic: "https://cdn.pixabay.com/download/audio/2022/03/15/audio_4d10e1c7ea.mp3",
+  dice: "https://cdn.pixabay.com/audio/2022/03/15/audio_2dde668f86.mp3",
+  hit: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
+  magic: "https://cdn.pixabay.com/audio/2022/03/15/audio_4d10e1c7ea.mp3",
+  bell: "https://cdn.pixabay.com/audio/2022/03/15/audio_5d2d5c0c69.mp3",
 };
 
 export function sfxPlay(key: keyof typeof SFX) {

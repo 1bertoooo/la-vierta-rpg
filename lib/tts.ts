@@ -1,11 +1,12 @@
 /**
- * TTS via Web Speech API (gratuito, nativo do browser).
- * Tenta achar voz pt-BR; fallback pra qualquer voz disponível.
+ * TTS via Web Speech API.
+ * Sincronização entre players: não dá pra garantir 100% (cada device tem voz diferente),
+ * mas todos disparam ao mesmo tempo via Realtime broadcast → começam juntos.
  */
 
 let cachedVoice: SpeechSynthesisVoice | null = null;
-let queue: string[] = [];
 let speaking = false;
+let currentUtterance: SpeechSynthesisUtterance | null = null;
 
 function pickBestVoice(): SpeechSynthesisVoice | null {
   if (cachedVoice) return cachedVoice;
@@ -13,65 +14,60 @@ function pickBestVoice(): SpeechSynthesisVoice | null {
   const voices = window.speechSynthesis.getVoices();
   if (!voices.length) return null;
 
-  // Prefere pt-BR, depois pt, depois en
+  // Prefere vozes femininas pt-BR (Luciana, Maria, Camila), depois qualquer pt-BR, depois pt
+  const ptBrFemale = voices.find((v) => /pt-?br/i.test(v.lang) && /luciana|maria|camila|francisca|paulina/i.test(v.name));
   const ptBr = voices.find((v) => /pt-?br/i.test(v.lang));
   const pt = voices.find((v) => /pt/i.test(v.lang));
-  const fallback = voices[0];
-  cachedVoice = ptBr || pt || fallback;
+  cachedVoice = ptBrFemale || ptBr || pt || voices[0];
   return cachedVoice;
 }
 
-export function ttsSpeak(text: string, opts?: { rate?: number; pitch?: number }) {
+// Pre-warm voices async (Chrome carrega depois)
+if (typeof window !== "undefined" && window.speechSynthesis) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    cachedVoice = null;
+    pickBestVoice();
+  };
+}
+
+export function ttsSpeak(text: string, opts?: { rate?: number; pitch?: number; force?: boolean }) {
   if (typeof window === "undefined" || !window.speechSynthesis) return;
   if (!text.trim()) return;
 
-  // Garante voz carregada (Chrome carrega async)
   if (!pickBestVoice()) {
     setTimeout(() => ttsSpeak(text, opts), 200);
     return;
   }
 
+  // Se forçado, cancela tudo
+  if (opts?.force || speaking) {
+    window.speechSynthesis.cancel();
+  }
+
   const u = new SpeechSynthesisUtterance(text);
   u.voice = cachedVoice;
   u.lang = cachedVoice?.lang || "pt-BR";
-  u.rate = opts?.rate ?? 0.95;
+  u.rate = opts?.rate ?? 0.92;
   u.pitch = opts?.pitch ?? 1.0;
   u.onend = () => {
     speaking = false;
-    flushQueue();
+    currentUtterance = null;
   };
   u.onerror = () => {
     speaking = false;
-    flushQueue();
+    currentUtterance = null;
   };
 
-  if (speaking) {
-    queue.push(text);
-    return;
-  }
   speaking = true;
+  currentUtterance = u;
   window.speechSynthesis.speak(u);
-}
-
-function flushQueue() {
-  if (queue.length === 0) return;
-  const next = queue.shift()!;
-  ttsSpeak(next);
 }
 
 export function ttsStop() {
   if (typeof window === "undefined" || !window.speechSynthesis) return;
-  queue = [];
   speaking = false;
+  currentUtterance = null;
   window.speechSynthesis.cancel();
-}
-
-// Quebra texto longo em frases pra TTS soar mais natural
-export function dividirEmFrases(texto: string): string[] {
-  return texto
-    .split(/(?<=[.!?])\s+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
 }
 
 const TTS_KEY = "lavierta:tts:enabled";
@@ -85,4 +81,8 @@ export function ttsSetEnabled(v: boolean) {
   if (typeof window === "undefined") return;
   localStorage.setItem(TTS_KEY, v ? "true" : "false");
   if (!v) ttsStop();
+}
+
+export function ttsIsSpeaking(): boolean {
+  return speaking;
 }

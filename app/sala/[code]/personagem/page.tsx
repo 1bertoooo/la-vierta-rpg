@@ -12,6 +12,8 @@ import {
   ClasseKey,
   RACAS,
   RacaKey,
+  SEXOS,
+  SexoKey,
   POINT_BUY_BUDGET,
   totalPointBuy,
   custoPointBuy,
@@ -23,9 +25,17 @@ import {
   promptRetrato,
   CANTRIPS_POR_CLASSE,
   MAGIAS_N1_POR_CLASSE,
+  PERGUNTAS_HISTORICO,
 } from "@/lib/lvs";
 
-type Step = "raca" | "classe" | "atributos" | "background" | "retrato" | "salvando";
+type Step =
+  | "raca"
+  | "classe"
+  | "atributos"
+  | "sexo"
+  | "historia"
+  | "retrato"
+  | "salvando";
 
 export default function CriacaoPage({
   params,
@@ -42,11 +52,17 @@ export default function CriacaoPage({
   const [raca, setRaca] = useState<RacaKey | null>(null);
   const [classe, setClasse] = useState<ClasseKey | null>(null);
   const [atributos, setAtributos] = useState<Record<AtributoKey, number>>(ATRIBUTOS_DEFAULT);
-  const [genero, setGenero] = useState("");
+  const [sexo, setSexo] = useState<SexoKey | null>(null);
+  const [aparencia, setAparencia] = useState("");
   const [nome, setNome] = useState("");
+  const [respostas, setRespostas] = useState<Record<string, string>>({});
   const [background, setBackground] = useState("");
+  const [gerandoHistoria, setGerandoHistoria] = useState(false);
+
   const [retratoEscolhido, setRetratoEscolhido] = useState<string | null>(null);
   const [retratoSeeds, setRetratoSeeds] = useState<number[]>([1, 2, 3, 4]);
+  // Counter forçar React refazer img mesmo se URL repetir
+  const [retratoVersion, setRetratoVersion] = useState(0);
 
   const [erro, setErro] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -77,7 +93,6 @@ export default function CriacaoPage({
         .maybeSingle();
       if (camp) {
         setCampaignId(camp.id);
-        // Já tem personagem? Redireciona
         const { data: existing } = await sb
           .from("characters")
           .select("id")
@@ -94,7 +109,6 @@ export default function CriacaoPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [code]);
 
-  // Atributos com bônus racial aplicado (preview)
   const atributosFinais = raca ? aplicarBonusRacial(atributos, raca) : atributos;
   const pontosUsados = totalPointBuy(atributos);
   const pontosRestantes = POINT_BUY_BUDGET - pontosUsados;
@@ -110,12 +124,39 @@ export default function CriacaoPage({
 
   function regerarRetratos() {
     setRetratoSeeds([
-      Math.floor(Math.random() * 100000),
-      Math.floor(Math.random() * 100000),
-      Math.floor(Math.random() * 100000),
-      Math.floor(Math.random() * 100000),
+      Math.floor(Math.random() * 1000000),
+      Math.floor(Math.random() * 1000000),
+      Math.floor(Math.random() * 1000000),
+      Math.floor(Math.random() * 1000000),
     ]);
     setRetratoEscolhido(null);
+    setRetratoVersion((v) => v + 1);
+  }
+
+  async function gerarHistoriaIA() {
+    if (!raca || !classe || !sexo || !nome.trim()) return;
+    setGerandoHistoria(true);
+    setErro(null);
+    try {
+      const r = await fetch("/api/background", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          raca: RACAS.find((x) => x.key === raca)?.nome || raca,
+          classe: CLASSES.find((x) => x.key === classe)?.nome || classe,
+          nome,
+          sexo: SEXOS.find((x) => x.key === sexo)?.nome || sexo,
+          respostas,
+        }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || "Erro");
+      setBackground(data.text || "");
+    } catch (e) {
+      setErro(e instanceof Error ? e.message : "Erro ao gerar história");
+    } finally {
+      setGerandoHistoria(false);
+    }
   }
 
   async function salvar() {
@@ -127,6 +168,10 @@ export default function CriacaoPage({
       const cantrips = CANTRIPS_POR_CLASSE[classe] || [];
       const magiasN1 = MAGIAS_N1_POR_CLASSE[classe] || [];
       const classeInfo = CLASSES.find((c) => c.key === classe)!;
+
+      const aparenciaCompleta = [sexo ? SEXOS.find((s) => s.key === sexo)?.nome : null, aparencia.trim() || null]
+        .filter(Boolean)
+        .join(" · ");
 
       const ficha = {
         campaign_id: campaignId,
@@ -144,13 +189,23 @@ export default function CriacaoPage({
         hp_max: hpMaximoNivel1(classe, atributosFinais.con),
         hp_current: hpMaximoNivel1(classe, atributosFinais.con),
         ac: caBase(atributosFinais.des),
-        background: genero
-          ? `${genero}\n\n${background.trim()}`.trim()
-          : background.trim() || null,
+        background:
+          (aparenciaCompleta ? `**Aparência:** ${aparenciaCompleta}\n\n` : "") +
+          (background.trim() || ""),
         portrait_url: retratoEscolhido,
         spells: [...cantrips, ...magiasN1.slice(0, 2)],
         features: classeInfo.features,
-        inventory: [],
+        inventory: [
+          { id: "moeda", nome: "10 Lacrimas de Bruna", tipo: "moeda", desc: "Moeda do reino" },
+          ...(classe === "guerreiro" ? [{ id: "espada", nome: "Espada longa", tipo: "arma", desc: "1d8 dano cortante" }] : []),
+          ...(classe === "mago" ? [{ id: "tomo", nome: "Tomo arcano", tipo: "foco", desc: "Foco mágico" }] : []),
+          ...(classe === "clerigo" ? [{ id: "simbolo", nome: "Símbolo sagrado", tipo: "foco", desc: "Foco divino" }] : []),
+          ...(classe === "ladino" ? [{ id: "adaga", nome: "Adaga", tipo: "arma", desc: "1d4 dano perfurante, finesse" }] : []),
+          ...(classe === "barbaro" ? [{ id: "machado", nome: "Machado de mão", tipo: "arma", desc: "1d6 dano cortante" }] : []),
+          ...(classe === "bardo" ? [{ id: "alaude", nome: "Alaúde", tipo: "instrumento", desc: "Foco bárdico" }] : []),
+          { id: "kit-aventura", nome: "Kit do aventureiro", tipo: "kit", desc: "Mochila, corda, lanterna, sílex, água" },
+          { id: "pocao-cura", nome: "Poção de cura", tipo: "consumivel", desc: "Cura 2d4+2 HP", consumivel: true },
+        ],
       };
 
       const { error } = await sb.from("characters").insert(ficha);
@@ -171,10 +226,18 @@ export default function CriacaoPage({
     );
   }
 
+  const STEPS: { k: Step; label: string }[] = [
+    { k: "raca", label: "Raça" },
+    { k: "classe", label: "Classe" },
+    { k: "atributos", label: "Atributos" },
+    { k: "sexo", label: "Aparência" },
+    { k: "historia", label: "História" },
+    { k: "retrato", label: "Retrato" },
+  ];
+
   return (
     <main className="relative min-h-screen px-6 py-8 pergaminho-texture">
       <div className="max-w-3xl mx-auto epico-entrada">
-        {/* Header com progresso */}
         <div className="flex items-center justify-between mb-8">
           <Link href={`/sala/${code}`} className="text-xs uppercase tracking-[0.4em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
             ← Sala
@@ -185,15 +248,9 @@ export default function CriacaoPage({
         </div>
 
         {/* Stepper */}
-        <ol className="flex items-center justify-center gap-2 mb-12 text-xs uppercase tracking-widest">
-          {[
-            { k: "raca", label: "Raça" },
-            { k: "classe", label: "Classe" },
-            { k: "atributos", label: "Atributos" },
-            { k: "background", label: "História" },
-            { k: "retrato", label: "Retrato" },
-          ].map((s, i) => (
-            <li key={s.k} className="flex items-center gap-2">
+        <ol className="flex items-center justify-center gap-1 sm:gap-2 mb-12 text-xs uppercase tracking-widest flex-wrap">
+          {STEPS.map((s, i) => (
+            <li key={s.k} className="flex items-center gap-1 sm:gap-2">
               <span
                 className={`w-7 h-7 rounded-full flex items-center justify-center border ${
                   step === s.k
@@ -203,15 +260,15 @@ export default function CriacaoPage({
               >
                 {i + 1}
               </span>
-              <span className={step === s.k ? "text-[var(--color-pergaminho)]" : "text-[var(--color-pedra)]"}>
+              <span className={step === s.k ? "text-[var(--color-pergaminho)]" : "text-[var(--color-pedra)] hidden sm:inline"}>
                 {s.label}
               </span>
-              {i < 4 && <span className="text-[var(--color-pedra)] mx-1">·</span>}
+              {i < STEPS.length - 1 && <span className="text-[var(--color-pedra)] mx-1 hidden sm:inline">·</span>}
             </li>
           ))}
         </ol>
 
-        {/* STEP RAÇA */}
+        {/* RAÇA */}
         {step === "raca" && (
           <section>
             <h2 className="text-3xl text-[var(--color-dourado-claro)] dourado-glow mb-2 font-[family-name:var(--font-cinzel)]">
@@ -243,7 +300,7 @@ export default function CriacaoPage({
           </section>
         )}
 
-        {/* STEP CLASSE */}
+        {/* CLASSE */}
         {step === "classe" && (
           <section>
             <h2 className="text-3xl text-[var(--color-dourado-claro)] dourado-glow mb-2 font-[family-name:var(--font-cinzel)]">
@@ -280,21 +337,19 @@ export default function CriacaoPage({
               ))}
             </div>
             <div className="mt-8">
-              <button onClick={() => setStep("raca")} className="btn-selo-secundario text-xs">
-                Voltar
-              </button>
+              <button onClick={() => setStep("raca")} className="btn-selo-secundario text-xs">Voltar</button>
             </div>
           </section>
         )}
 
-        {/* STEP ATRIBUTOS */}
+        {/* ATRIBUTOS */}
         {step === "atributos" && raca && classe && (
           <section>
             <h2 className="text-3xl text-[var(--color-dourado-claro)] dourado-glow mb-2 font-[family-name:var(--font-cinzel)]">
               Tuas forças
             </h2>
             <p className="text-sm text-[var(--color-pergaminho-velho)] mb-2">
-              Point-buy: {pontosUsados}/{POINT_BUY_BUDGET} pontos usados.
+              Point-buy: {pontosUsados}/{POINT_BUY_BUDGET} pontos.
             </p>
             <p className="text-xs text-[var(--color-pedra)] mb-6">
               Cada atributo de 8-15. Bônus racial é aplicado depois (preview ao lado).
@@ -306,10 +361,7 @@ export default function CriacaoPage({
                 const final = atributosFinais[a.key];
                 const mod = modAtributo(final);
                 return (
-                  <div
-                    key={a.key}
-                    className="flex items-center gap-3 bg-[var(--color-carvao)]/40 border border-[var(--color-pergaminho-velho)]/30 rounded-lg p-3"
-                  >
+                  <div key={a.key} className="flex items-center gap-3 bg-[var(--color-carvao)]/40 border border-[var(--color-pergaminho-velho)]/30 rounded-lg p-3">
                     <div className="flex-1 min-w-0">
                       <div className="flex items-baseline gap-2">
                         <span className="text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">{a.nome}</span>
@@ -320,64 +372,46 @@ export default function CriacaoPage({
                       onClick={() => ajustarAtributo(a.key, -1)}
                       disabled={valor <= 8}
                       className="w-8 h-8 rounded border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] disabled:opacity-30"
-                    >
-                      −
-                    </button>
+                    >−</button>
                     <div className="text-center w-24">
                       <div className="text-xl text-[var(--color-pergaminho)] font-[family-name:var(--font-cinzel-decorative)]">
                         {valor}
-                        {final !== valor && (
-                          <span className="text-sm text-[var(--color-dourado)] ml-1">→ {final}</span>
-                        )}
+                        {final !== valor && (<span className="text-sm text-[var(--color-dourado)] ml-1">→ {final}</span>)}
                       </div>
-                      <div className="text-xs text-[var(--color-pergaminho-velho)]">
-                        mod {mod >= 0 ? `+${mod}` : mod}
-                      </div>
+                      <div className="text-xs text-[var(--color-pergaminho-velho)]">mod {mod >= 0 ? `+${mod}` : mod}</div>
                     </div>
                     <button
                       onClick={() => ajustarAtributo(a.key, +1)}
                       disabled={valor >= 15 || custoPointBuy(valor + 1) - custoPointBuy(valor) > pontosRestantes}
                       className="w-8 h-8 rounded border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] disabled:opacity-30"
-                    >
-                      +
-                    </button>
+                    >+</button>
                   </div>
                 );
               })}
             </div>
 
             <div className="flex gap-3 justify-between">
-              <button onClick={() => setStep("classe")} className="btn-selo-secundario text-xs">
-                Voltar
-              </button>
-              <button
-                onClick={() => setStep("background")}
-                disabled={pontosUsados !== POINT_BUY_BUDGET}
-                className="btn-selo disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {pontosUsados < POINT_BUY_BUDGET
-                  ? `Faltam ${POINT_BUY_BUDGET - pontosUsados} pts`
-                  : "Continuar"}
+              <button onClick={() => setStep("classe")} className="btn-selo-secundario text-xs">Voltar</button>
+              <button onClick={() => setStep("sexo")} disabled={pontosUsados !== POINT_BUY_BUDGET} className="btn-selo disabled:opacity-50 disabled:cursor-not-allowed">
+                {pontosUsados < POINT_BUY_BUDGET ? `Faltam ${POINT_BUY_BUDGET - pontosUsados} pts` : "Continuar"}
               </button>
             </div>
           </section>
         )}
 
-        {/* STEP BACKGROUND */}
-        {step === "background" && (
+        {/* SEXO + APARÊNCIA */}
+        {step === "sexo" && (
           <section>
             <h2 className="text-3xl text-[var(--color-dourado-claro)] dourado-glow mb-2 font-[family-name:var(--font-cinzel)]">
-              Tua história
+              Tua forma
             </h2>
             <p className="text-sm text-[var(--color-pergaminho-velho)] mb-8">
-              Quem é teu personagem antes da aventura começar?
+              Como tua aparência se mostra no mundo.
             </p>
 
-            <div className="space-y-5">
+            <div className="space-y-6">
               <div>
-                <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
-                  Nome do personagem
-                </label>
+                <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3 block">Nome do personagem</label>
                 <input
                   type="text"
                   required
@@ -390,78 +424,152 @@ export default function CriacaoPage({
               </div>
 
               <div>
-                <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
-                  Aparência (opcional)
-                </label>
-                <input
-                  type="text"
-                  maxLength={60}
-                  placeholder="ex: mulher de cabelo prateado, homem de barba ruiva"
-                  value={genero}
-                  onChange={(e) => setGenero(e.target.value)}
-                  className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-dourado)]"
-                />
+                <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3 block">Sexo / Apresentação</label>
+                <div className="grid grid-cols-3 gap-3">
+                  {SEXOS.map((s) => (
+                    <button
+                      key={s.key}
+                      onClick={() => setSexo(s.key)}
+                      className={`px-4 py-3 rounded border transition ${
+                        sexo === s.key
+                          ? "border-[var(--color-dourado)] bg-[var(--color-vinho)]/30 text-[var(--color-dourado)]"
+                          : "border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] hover:border-[var(--color-dourado)]/60"
+                      }`}
+                    >
+                      {s.nome}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div>
-                <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
-                  Background (opcional)
+                <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3 block">
+                  Detalhes visuais (opcional)
                 </label>
-                <textarea
-                  rows={4}
-                  maxLength={500}
-                  placeholder="De onde veio? Quais cicatrizes carrega? O que busca em Vélreth?"
-                  value={background}
-                  onChange={(e) => setBackground(e.target.value)}
-                  className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-dourado)] resize-none"
+                <input
+                  type="text"
+                  maxLength={100}
+                  placeholder="cabelo prateado e cicatriz no rosto, barba ruiva trançada, tatuagens tribais…"
+                  value={aparencia}
+                  onChange={(e) => setAparencia(e.target.value)}
+                  className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-dourado)]"
                 />
+                <p className="text-xs text-[var(--color-pedra)] mt-2">Isso vai pra arte do retrato.</p>
               </div>
             </div>
 
             <div className="mt-8 flex gap-3 justify-between">
-              <button onClick={() => setStep("atributos")} className="btn-selo-secundario text-xs">
-                Voltar
-              </button>
-              <button
-                onClick={() => {
-                  regerarRetratos();
-                  setStep("retrato");
-                }}
-                disabled={!nome.trim()}
-                className="btn-selo disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                Gerar retrato
+              <button onClick={() => setStep("atributos")} className="btn-selo-secundario text-xs">Voltar</button>
+              <button onClick={() => setStep("historia")} disabled={!nome.trim() || !sexo} className="btn-selo disabled:opacity-50 disabled:cursor-not-allowed">
+                Continuar
               </button>
             </div>
           </section>
         )}
 
-        {/* STEP RETRATO */}
+        {/* HISTÓRIA */}
+        {step === "historia" && (
+          <section>
+            <h2 className="text-3xl text-[var(--color-dourado-claro)] dourado-glow mb-2 font-[family-name:var(--font-cinzel)]">
+              Tua história
+            </h2>
+            <p className="text-sm text-[var(--color-pergaminho-velho)] mb-8">
+              Responde o que quiser (todas opcionais), depois um botão gera o background com a IA — ou escreve direto se preferir.
+            </p>
+
+            <div className="space-y-4 mb-6">
+              {PERGUNTAS_HISTORICO.map((p) => (
+                <div key={p.key}>
+                  <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
+                    {p.label}
+                  </label>
+                  <input
+                    type="text"
+                    placeholder={p.placeholder}
+                    value={respostas[p.key] || ""}
+                    onChange={(e) => setRespostas((prev) => ({ ...prev, [p.key]: e.target.value }))}
+                    className="w-full px-4 py-2.5 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] text-sm focus:outline-none focus:border-[var(--color-dourado)]"
+                  />
+                </div>
+              ))}
+            </div>
+
+            <div className="mb-4 flex flex-wrap gap-2 items-center">
+              <button
+                onClick={gerarHistoriaIA}
+                disabled={gerandoHistoria}
+                className="px-4 py-2 rounded bg-[var(--color-vinho)]/40 border border-[var(--color-dourado)] text-[var(--color-dourado)] text-xs uppercase tracking-widest hover:bg-[var(--color-vinho)]/60 disabled:opacity-50"
+              >
+                {gerandoHistoria ? "✦ Tecendo a história…" : "✦ Gerar história com IA"}
+              </button>
+              {background && (
+                <span className="text-xs text-[var(--color-pergaminho-velho)] italic">
+                  {background.length} caracteres — pode editar livre abaixo
+                </span>
+              )}
+            </div>
+
+            <div>
+              <label className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1.5 block">
+                Background final (sem limite)
+              </label>
+              <textarea
+                rows={10}
+                value={background}
+                onChange={(e) => setBackground(e.target.value)}
+                placeholder="Escreve aqui a história, ou clica acima pra IA gerar baseado nas respostas…"
+                className="w-full px-4 py-3 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-dourado)] resize-y leading-relaxed"
+              />
+            </div>
+
+            {erro && <p className="text-[var(--color-sangue)] text-sm mt-3">{erro}</p>}
+
+            <div className="mt-8 flex gap-3 justify-between">
+              <button onClick={() => setStep("sexo")} className="btn-selo-secundario text-xs">Voltar</button>
+              <button onClick={() => { regerarRetratos(); setStep("retrato"); }} className="btn-selo">Gerar retrato</button>
+            </div>
+          </section>
+        )}
+
+        {/* RETRATO */}
         {(step === "retrato" || step === "salvando") && raca && classe && (
           <section>
             <h2 className="text-3xl text-[var(--color-dourado-claro)] dourado-glow mb-2 font-[family-name:var(--font-cinzel)]">
               Teu rosto
             </h2>
             <p className="text-sm text-[var(--color-pergaminho-velho)] mb-8">
-              A IA forjou 4 retratos. Escolhe um — ou re-roll.
+              4 retratos forjados pela IA. Escolhe um — ou re-roll por novos.
             </p>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
               {retratoSeeds.map((seed) => {
-                const url = buildPollinationsUrl(promptRetrato({ raca, classe, genero }), seed);
+                const url = buildPollinationsUrl(
+                  promptRetrato({
+                    raca,
+                    classe,
+                    sexo: sexo || undefined,
+                    aparencia,
+                  }),
+                  seed
+                );
                 const escolhido = retratoEscolhido === url;
+                // key composto força React a refazer img mesmo se URL/seed mudar
+                const imgKey = `${seed}-${retratoVersion}`;
                 return (
                   <button
-                    key={seed}
+                    key={imgKey}
                     onClick={() => setRetratoEscolhido(url)}
                     className={`relative aspect-square rounded-lg overflow-hidden border-2 transition ${
-                      escolhido ? "border-[var(--color-dourado)] ring-2 ring-[var(--color-dourado)]/40" : "border-[var(--color-pergaminho-velho)]/30 hover:border-[var(--color-dourado)]/60"
+                      escolhido
+                        ? "border-[var(--color-dourado)] ring-2 ring-[var(--color-dourado)]/40"
+                        : "border-[var(--color-pergaminho-velho)]/30 hover:border-[var(--color-dourado)]/60"
                     }`}
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
+                      key={imgKey}
                       src={url}
-                      alt="Retrato"
+                      alt={`Retrato ${seed}`}
                       className="w-full h-full object-cover"
                       loading="lazy"
                     />
@@ -475,28 +583,22 @@ export default function CriacaoPage({
               })}
             </div>
 
-            <div className="flex flex-wrap gap-3 mb-8">
+            <div className="flex flex-wrap gap-3 mb-8 items-center">
               <button onClick={regerarRetratos} className="btn-selo-secundario text-xs" disabled={step === "salvando"}>
                 ↻ Re-rolar retratos
               </button>
               <p className="text-xs text-[var(--color-pedra)] flex-1 self-center">
-                Geração via Pollinations.ai · gratuito · pode demorar 5-15s.
+                Pollinations.ai · grátis · pode demorar 5-15s pra carregar.
               </p>
             </div>
 
-            {erro && (
-              <p className="text-[var(--color-sangue)] text-sm mb-4">{erro}</p>
-            )}
+            {erro && <p className="text-[var(--color-sangue)] text-sm mb-4">{erro}</p>}
 
             <div className="flex gap-3 justify-between">
-              <button onClick={() => setStep("background")} className="btn-selo-secundario text-xs" disabled={step === "salvando"}>
+              <button onClick={() => setStep("historia")} className="btn-selo-secundario text-xs" disabled={step === "salvando"}>
                 Voltar
               </button>
-              <button
-                onClick={salvar}
-                disabled={!retratoEscolhido || step === "salvando"}
-                className="btn-selo disabled:opacity-50 disabled:cursor-not-allowed"
-              >
+              <button onClick={salvar} disabled={!retratoEscolhido || step === "salvando"} className="btn-selo disabled:opacity-50 disabled:cursor-not-allowed">
                 {step === "salvando" ? "Selando o pergaminho…" : "Confirmar e entrar na sala"}
               </button>
             </div>

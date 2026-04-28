@@ -687,6 +687,22 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   async function chamarDM(prompt: string, isOpening = false) {
     if (!campaign || !sessionId || aguardandoIA) return;
+
+    // Lock atômico: previne 2 jogadores chamarem DM simultaneamente.
+    // Se RPC ainda não migrou, ignora e segue (degradação graciosa).
+    const sb = getSupabase();
+    try {
+      const { data: locked } = await sb.rpc("try_lock_dm", { p_session_id: sessionId });
+      if (locked === false) {
+        await logEvent({
+          actor_type: "system",
+          event_type: "info",
+          payload: { text: "Mestre já está invocando outra cena — aguarda." },
+        });
+        return;
+      }
+    } catch {} // RPC não existe ainda — fallback OK
+
     setAguardandoIA(true);
 
     // Broadcast: outros clientes mostram loader também (não só quem mandou)
@@ -702,7 +718,6 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       });
     }
 
-    const sb = getSupabase();
     const { data: recent } = await sb.from("combat_log").select("*").eq("session_id", sessionId).order("created_at", { ascending: false }).limit(15);
 
     const messages = ((recent as LogEvent[]) || [])
@@ -800,6 +815,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       } catch {}
     } finally {
       setAguardandoIA(false);
+      // Libera o lock independente de sucesso/falha
+      try {
+        if (sessionId) await sb.rpc("release_dm_lock", { p_session_id: sessionId });
+      } catch {}
     }
   }
 

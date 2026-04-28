@@ -54,24 +54,38 @@ export async function GET(req: NextRequest) {
   const url = MOOD_TRACKS[mood] || MOOD_TRACKS.tavern;
 
   try {
-    const r = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; LaVierta/1.0)" },
-    });
-    if (!r.ok) {
+    // Repassa Range request do browser pro upstream (suporte a seek e streaming)
+    const range = req.headers.get("range");
+    const upstreamHeaders: Record<string, string> = {
+      "User-Agent": "Mozilla/5.0 (compatible; LaVierta/1.0)",
+    };
+    if (range) upstreamHeaders["Range"] = range;
+
+    const r = await fetch(url, { headers: upstreamHeaders });
+    if (!r.ok && r.status !== 206) {
       return new Response(JSON.stringify({ error: `upstream ${r.status}` }), {
         status: 502,
         headers: { "Content-Type": "application/json" },
       });
     }
 
-    const audio = await r.arrayBuffer();
-    return new Response(audio, {
-      headers: {
-        "Content-Type": "audio/mpeg",
-        "Cache-Control": "public, max-age=86400, s-maxage=86400, immutable",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, HEAD",
-      },
+    // STREAM em vez de carregar tudo em memória.
+    // Browser começa a tocar assim que tiver bytes suficientes (1-2 segundos).
+    const headers: Record<string, string> = {
+      "Content-Type": "audio/mpeg",
+      "Cache-Control": "public, max-age=86400, s-maxage=86400, immutable",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD",
+      "Accept-Ranges": "bytes",
+    };
+    const cl = r.headers.get("content-length");
+    if (cl) headers["Content-Length"] = cl;
+    const cr = r.headers.get("content-range");
+    if (cr) headers["Content-Range"] = cr;
+
+    return new Response(r.body, {
+      status: r.status,
+      headers,
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "erro";
@@ -83,5 +97,22 @@ export async function GET(req: NextRequest) {
 }
 
 export async function HEAD(req: NextRequest) {
-  return GET(req);
+  // HEAD: só checa upstream sem stream, retorna headers
+  const mood = req.nextUrl.searchParams.get("mood") || "tavern";
+  if (!VALID_MOODS.has(mood)) return new Response(null, { status: 400 });
+  const url = MOOD_TRACKS[mood] || MOOD_TRACKS.tavern;
+  try {
+    const r = await fetch(url, { method: "HEAD", headers: { "User-Agent": "Mozilla/5.0" } });
+    return new Response(null, {
+      status: r.status,
+      headers: {
+        "Content-Type": "audio/mpeg",
+        "Content-Length": r.headers.get("content-length") || "0",
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=86400, immutable",
+      },
+    });
+  } catch {
+    return new Response(null, { status: 502 });
+  }
 }

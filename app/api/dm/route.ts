@@ -63,23 +63,24 @@ function pickProviders(): ProviderConfig[] {
 }
 
 async function callOpenAI(cfg: ProviderConfig, messages: Msg[]): Promise<string> {
-  // GPT-5 é modelo de reasoning — gasta tokens "pensando" antes de gerar resposta.
-  // reasoning_effort: low evita gastar muito; max_completion_tokens precisa de folga
-  // (envolve reasoning_tokens + tokens visíveis).
+  // GPT-5 é modelo de reasoning — reasoning_effort medium dá narrativa muito melhor que low.
+  // max_completion_tokens: 4000 dá folga pra reasoning_tokens + prosa épica.
   const isGPT5 = cfg.model.startsWith("gpt-5");
   const body = isGPT5
     ? {
         model: cfg.model,
         messages,
-        max_completion_tokens: 1500,
-        reasoning_effort: "low",
+        max_completion_tokens: 4000,
+        reasoning_effort: "medium",
       }
     : {
         model: cfg.model,
         messages,
-        max_tokens: 700,
-        temperature: 0.85,
-        top_p: 0.95,
+        max_tokens: 900,
+        temperature: 0.92,
+        top_p: 0.96,
+        presence_penalty: 0.3,
+        frequency_penalty: 0.2,
       };
   const r = await fetch(cfg.url, {
     method: "POST",

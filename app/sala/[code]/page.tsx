@@ -206,6 +206,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   // Tempo do dia e clima
   const [timeOfDay, setTimeOfDay] = useState<string>("day");
   const [weather, setWeather] = useState<string>("clear");
+  // Doom clocks (Vincent Baker / John Harper)
+  const [doomClocks, setDoomClocks] = useState<Record<string, { max: number; current: number; label?: string }>>({
+    doom:        { max: 12, current: 0, label: "A Vierta acorda" },
+    arco:        { max: 8,  current: 0, label: "Arco atual" },
+    situacional: { max: 6,  current: 0, label: "Pressão imediata" },
+  });
+  // Aside privado pra mim (info que personagem viu, outros não)
+  const [asideRecebido, setAsideRecebido] = useState<string | null>(null);
   // Anti-flicker / cleanup do timeout do mestre
   const mestreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Channel pra broadcast "Mestre invocando" entre clients (não-DB, mais rápido)
@@ -383,13 +391,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             const { data: events } = await sb.from("combat_log").select("*").eq("session_id", sId as string).order("created_at", { ascending: true }).limit(200);
             if (!cancelled) setLog((events as LogEvent[]) || []);
 
-            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather").eq("id", sId).maybeSingle();
+            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather, doom_clocks").eq("id", sId).maybeSingle();
             if (!cancelled && sess) {
-              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string };
+              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }> };
               setCurrentTurnUserId(s.current_turn_player_id);
               setEmCombate(!!s.in_combat);
               if (s.time_of_day) setTimeOfDay(s.time_of_day);
               if (s.weather) setWeather(s.weather);
+              if (s.doom_clocks) setDoomClocks(s.doom_clocks);
             }
 
             // Iniciativa do combate atual (resilient se tabela ainda não migrada)
@@ -508,11 +517,12 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           ).on(
             "postgres_changes", { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sId}` },
             (payload) => {
-              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string };
+              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }> };
               setCurrentTurnUserId(sess.current_turn_player_id);
               if (typeof sess.in_combat === "boolean") setEmCombate(sess.in_combat);
               if (sess.time_of_day) setTimeOfDay(sess.time_of_day);
               if (sess.weather) setWeather(sess.weather);
+              if (sess.doom_clocks) setDoomClocks(sess.doom_clocks);
             }
           ).on(
             "postgres_changes", { event: "*", schema: "public", table: "combat_initiative", filter: `session_id=eq.${sId}` },
@@ -747,6 +757,36 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           setTimeout(() => sfxPlay("level"), Math.max(0, delayMs));
           break;
         }
+        case "clock": {
+          if (!sessionId) break;
+          setTimeout(async () => {
+            // Lê o estado atual, atualiza, escreve de volta (best-effort, sem CAS)
+            const { data: sess } = await sb.from("sessions")
+              .select("doom_clocks")
+              .eq("id", sessionId)
+              .maybeSingle();
+            const clocks = (sess as { doom_clocks?: Record<string, { max: number; current: number; label?: string }> } | null)?.doom_clocks || doomClocks;
+            const c = clocks[d.name];
+            if (!c) return;
+            let novo = d.op === "set" ? d.value : c.current + d.value;
+            novo = Math.max(0, Math.min(c.max, novo));
+            const updated = { ...clocks, [d.name]: { ...c, current: novo } };
+            await sb.from("sessions").update({ doom_clocks: updated }).eq("id", sessionId);
+            // Trovão se chegou no max (doom realizado)
+            if (novo >= c.max && d.name === "doom") sfxPlay("thunder");
+            else sfxPlay("page");
+          }, Math.max(0, delayMs));
+          break;
+        }
+        case "aside": {
+          // Aside privado — só o player alvo recebe (lateral, em modal)
+          if (!me?.nick || d.target.toLowerCase() !== me.nick.toLowerCase()) break;
+          setTimeout(() => {
+            setAsideRecebido(d.text);
+            sfxPlay("bell");
+          }, Math.max(0, delayMs));
+          break;
+        }
         case "xp": {
           if (!campaign) break;
           setTimeout(async () => {
@@ -854,6 +894,19 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     });
 
     try {
+      // Contexto rico — clocks, quests ativas, NPCs conhecidos, ambiente
+      const activeQuests = quests.filter((q) => q.status === "active").slice(0, 8).map((q) => q.title);
+      const knownNpcs = npcsConhecidos.slice(0, 12).map((n) => ({
+        name: n.name,
+        appearance: n.appearance || undefined,
+        bordao: n.bordao || undefined,
+        relation: n.relation,
+      }));
+      const clocksState: Record<string, string> = {};
+      for (const [k, v] of Object.entries(doomClocks)) {
+        clocksState[k] = `${v.current}/${v.max}${v.label ? ` (${v.label})` : ""}`;
+      }
+
       const r = await fetch("/api/dm", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -864,6 +917,12 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             current_location: "Amarelinho",
             chapter: campaign.current_chapter,
             players: playerCtx,
+            active_quests: activeQuests,
+            known_npcs: knownNpcs,
+            clocks: clocksState,
+            time_of_day: timeOfDay,
+            weather: weather,
+            in_combat: emCombate,
           },
         }),
       });
@@ -1301,6 +1360,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
         {/* Log */}
         <section className="flex-1 flex flex-col min-h-[60vh] max-h-[calc(100vh-120px)] lg:max-h-[calc(100vh-60px)]">
+          {/* Doom clocks — sempre visível (Vincent Baker) */}
+          <ClocksBar clocks={doomClocks} />
           {/* Tracker de iniciativa — só aparece em combate */}
           {emCombate && iniciativa.length > 0 && (
             <IniciativaTracker iniciativa={iniciativa} myUserId={me?.id} isAdmin={isAdmin} />
@@ -1492,6 +1553,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       {/* Modal NPC recém-conhecido — flair épico no primeiro encontro */}
       {npcRecemConhecido && (
         <NpcEncontroModal npc={npcRecemConhecido} onClose={() => setNpcRecemConhecido(null)} />
+      )}
+
+      {/* Aside privado: info que só meu personagem viu */}
+      {asideRecebido && (
+        <AsidePrivadoModal text={asideRecebido} onClose={() => setAsideRecebido(null)} />
       )}
 
       {/* Modal Pergaminhos: notas + quests + NPCs */}
@@ -1717,6 +1783,89 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * ClocksBar — Doom clocks visíveis (Vincent Baker / John Harper).
+ * Mostra 3 relógios com segmentos preenchidos. Ameaça implícita.
+ */
+function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: number; label?: string }> }) {
+  const order = ["doom", "arco", "situacional"];
+  const visible = order.filter((k) => clocks[k] && clocks[k].max > 0);
+  if (visible.length === 0) return null;
+  return (
+    <div className="border-b border-[var(--color-pergaminho-velho)]/15 px-3 sm:px-4 py-1.5 bg-[var(--color-carvao)]/30 flex flex-wrap gap-3 sm:gap-5">
+      {visible.map((k) => {
+        const c = clocks[k];
+        const pct = (c.current / c.max) * 100;
+        const cor =
+          k === "doom" ? "from-[var(--color-sangue)] to-[var(--color-vinho)]"
+          : k === "arco" ? "from-[var(--color-vinho)] to-[var(--color-dourado)]/60"
+          : "from-[var(--color-dourado)]/40 to-[var(--color-dourado)]";
+        return (
+          <div key={k} className="flex items-center gap-2 min-w-0 flex-shrink-0" title={`${c.label || k}: ${c.current}/${c.max}`}>
+            <span className="text-[9px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] flex-shrink-0">
+              {k === "doom" ? "⚰" : k === "arco" ? "⌛" : "⚡"} {c.current}/{c.max}
+            </span>
+            {/* Segmentos clicáveis-style (visualmente apenas) */}
+            <div className="flex gap-0.5">
+              {Array.from({ length: c.max }).map((_, i) => (
+                <span
+                  key={i}
+                  className={`block w-1.5 h-3 rounded-sm transition ${
+                    i < c.current
+                      ? `bg-gradient-to-b ${cor}`
+                      : "bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/30"
+                  }`}
+                />
+              ))}
+            </div>
+            {c.label && (
+              <span className="hidden lg:inline text-[10px] text-[var(--color-pergaminho-velho)] italic truncate max-w-32">
+                {c.label}
+              </span>
+            )}
+            {pct >= 75 && (
+              <span className="text-[10px] text-[var(--color-sangue)] animate-pulse">●</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * AsidePrivadoModal — info que SÓ meu personagem viu, outros não veem.
+ * Hitchcock: bomba sob a mesa. Aparece com flair de segredo.
+ */
+function AsidePrivadoModal({ text, onClose }: { text: string; onClose: () => void }) {
+  useEffect(() => {
+    const t = setTimeout(onClose, 12000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-[55] flex items-center justify-center bg-black/80 backdrop-blur-sm px-6" onClick={onClose}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative max-w-md w-full bg-[var(--color-carvao)] border border-[var(--color-vinho)] rounded-lg p-6 shadow-2xl animate-[asideEntra_0.6s_ease-out]"
+        style={{ boxShadow: "0 0 40px rgba(110, 26, 26, 0.5)" }}
+      >
+        <button onClick={onClose} className="absolute top-2 right-3 text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xl leading-none">×</button>
+        <p className="text-[10px] uppercase tracking-[0.4em] text-[var(--color-vinho)] mb-2 text-center">só você vê isso</p>
+        <div className="w-12 h-px mx-auto bg-[var(--color-vinho)] mb-4" />
+        <p className="text-[var(--color-pergaminho)] italic leading-relaxed whitespace-pre-wrap">{text}</p>
+        <p className="text-[9px] text-[var(--color-pergaminho-velho)] mt-4 text-center">os outros não receberam essa visão</p>
+      </div>
+      <style jsx>{`
+        @keyframes asideEntra {
+          from { opacity: 0; transform: scale(0.9) translateY(10px); }
+          to   { opacity: 1; transform: scale(1) translateY(0); }
+        }
+      `}</style>
     </div>
   );
 }

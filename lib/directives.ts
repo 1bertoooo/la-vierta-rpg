@@ -38,7 +38,9 @@ export type Directive =
   | { kind: "combat"; phase: "start" | "end" }
   | { kind: "level"; target: string }
   | { kind: "inspiration"; target: string }
-  | { kind: "xp"; target: string; amount: number };
+  | { kind: "xp"; target: string; amount: number }
+  | { kind: "clock"; name: string; op: "set" | "delta"; value: number }
+  | { kind: "aside"; target: string; text: string };
 
 const TAG_RE = /\[([A-Z_]+)(?:\s*:\s*|\s+)?([^\]]*)\]/gi;
 
@@ -157,6 +159,26 @@ function parseTag(tag: string, rest: string): Directive | null {
       const m4 = rest.match(/^(.+?)\s+\+?(\d+)$/);
       if (!m4) return null;
       return { kind: "xp", target: m4[1].trim(), amount: parseInt(m4[2], 10) };
+    }
+
+    case "CLOCK": {
+      // "doom +1" / "arco -2" / "situacional = 4" / "doom 1" (delta default)
+      const m5 = rest.match(/^(\w+)\s*(=|[+-])?\s*(\d+)$/);
+      if (!m5) return null;
+      const name = m5[1].toLowerCase();
+      const op = m5[2] === "=" ? "set" : "delta";
+      const sign = m5[2] === "-" ? -1 : 1;
+      const v = parseInt(m5[3], 10);
+      return { kind: "clock", name, op, value: op === "set" ? v : sign * v };
+    }
+
+    case "ASIDE": {
+      // "bebeto: você nota algo que outros não viram..."
+      const idx = rest.indexOf(":");
+      if (idx === -1) return null;
+      const target = rest.slice(0, idx).trim();
+      const text = rest.slice(idx + 1).trim();
+      return { kind: "aside", target, text };
     }
 
     default:

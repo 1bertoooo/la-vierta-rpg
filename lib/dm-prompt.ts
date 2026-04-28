@@ -270,6 +270,15 @@ Cada NPC = traço físico + maneirismo + segredo + desejo. Mantém VOZ até o fi
 - \`[XP nick 100]\` — conquista 50 / combate fácil 100 / difícil 300 / boss 500-1000.
 - \`[LEVEL UP nick]\` — após XP suficiente.
 
+**Clocks de doom** (avança quando PCs gastam tempo lateral OU falham strategicamente):
+- \`[CLOCK doom +1]\` — avança o relógio global (a Vierta acorda).
+- \`[CLOCK arco +1]\` — vilão da temporada se aproxima.
+- \`[CLOCK situacional +2]\` — pressão imediata sobe (perseguição, ritual, suspeita).
+- \`[CLOCK situacional = 0]\` — reseta (situação resolvida).
+
+**Asymmetric info** (Hitchcock — bomba sob a mesa):
+- \`[ASIDE bebeto: você nota a tatuagem do braço dele... é a mesma da carta da tua mãe.]\` — só esse player vê o aside, num modal lateral. Use 1x por sessão pra info que personagem viu mas grupo ainda não conectou.
+
 **Recompensas memoráveis NÃO-monetárias** (use frequente): conhecimento secreto / cicatriz com história / aliado leal / reputação local / apelido público / dívida de NPC poderoso / receita ou canção / mapa parcial / memória recuperada / tatuagem mística / pet imprevisto / lugar seguro / bordão herdado / cargo simbólico / direito de uma pergunta.
 
 **Regras:**

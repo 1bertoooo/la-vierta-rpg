@@ -14,6 +14,12 @@ type Body = {
     current_location?: string;
     chapter?: number;
     players?: { nick: string; character?: { name: string; race: string; class: string; hp: number; hp_max: number } }[];
+    active_quests?: string[];
+    known_npcs?: { name: string; appearance?: string; bordao?: string; relation?: number }[];
+    clocks?: Record<string, string>;
+    time_of_day?: string;
+    weather?: string;
+    in_combat?: boolean;
   };
 };
 
@@ -164,17 +170,40 @@ export async function POST(req: Request) {
       if (context.campaign_name) parts.push(`Campanha: ${context.campaign_name}`);
       if (context.current_location) parts.push(`Local: ${context.current_location}`);
       if (context.chapter) parts.push(`Capítulo: ${context.chapter}`);
+      if (context.time_of_day || context.weather) {
+        parts.push(`Cena: ${context.time_of_day || "day"} · ${context.weather || "clear"}${context.in_combat ? " · EM COMBATE" : ""}`);
+      }
+      if (context.clocks) {
+        parts.push("Doom clocks (use pra calibrar a tensão; avance via [CLOCK <nome> +N] quando PCs gastarem tempo lateral ou falharem):");
+        for (const [k, v] of Object.entries(context.clocks)) {
+          parts.push(`- ${k}: ${v}`);
+        }
+      }
       if (context.players?.length) {
         parts.push("Jogadores:");
         for (const p of context.players) {
           if (p.character) {
-            parts.push(`- ${p.character.name} (${p.character.race}/${p.character.class}, HP ${p.character.hp}/${p.character.hp_max}) por ${p.nick}`);
+            parts.push(`- ${p.character.name} (${p.character.race}/${p.character.class}, HP ${p.character.hp}/${p.character.hp_max}) — nick: ${p.nick}`);
           } else {
             parts.push(`- ${p.nick} (sem ficha)`);
           }
         }
       }
-      ctxStr = "\n\n## CONTEXTO\n" + parts.join("\n");
+      if (context.active_quests?.length) {
+        parts.push("Missões ativas (referencia na narração quando relevante):");
+        for (const q of context.active_quests) parts.push(`- ${q}`);
+      }
+      if (context.known_npcs?.length) {
+        parts.push("NPCs conhecidos pelos PCs (NÃO os reapresenta como novos; usa direto):");
+        for (const n of context.known_npcs) {
+          const partsNpc = [n.name];
+          if (n.appearance) partsNpc.push(n.appearance);
+          if (n.bordao) partsNpc.push(`"${n.bordao}"`);
+          if (n.relation !== undefined && n.relation !== 0) partsNpc.push(`relação ${n.relation > 0 ? "+" : ""}${n.relation}`);
+          parts.push(`- ${partsNpc.join(" · ")}`);
+        }
+      }
+      ctxStr = "\n\n## CONTEXTO ATUAL\n" + parts.join("\n");
     }
 
     const systemPrompt = `${DM_CORE}\n\n${lore}${ctxStr}`;

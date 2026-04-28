@@ -4,15 +4,16 @@
  * mecânicas no client. Tudo é passivo: a IA SUGERE, o player CONFIRMA.
  *
  * Tags suportadas:
- *  [MUSICA: tavern]               — troca trilha
- *  [SFX: thunder]                 — som pontual
- *  [ROLL: SAB DC 15]              — pede rolagem (atributo + DC)
- *  [ROLL: SAB DC 15 vantagem]     — vantagem/desvantagem
- *  [ATTACK: <alvo> 1d20+5 vs AC 13]
- *  [SAVE: WIS DC 14]              — alias semântico de ROLL
- *  [INITIATIVE]                   — começa combate, todos rolam iniciativa
- *  [HP <nick> -5] / [HP <nick> +8] — aplica dano/cura
- *  [REWARD: 50 lb]                — entrega Lacrimas de Bruna
+ *  [MUSICA: tavern]                       — troca trilha
+ *  [SFX: thunder]                         — som pontual
+ *  [ROLL: SAB DC 15 @bebeto]              — pede rolagem PARA UM JOGADOR ESPECÍFICO (sempre marca @nick)
+ *  [ROLL: SAB DC 15]                      — sem @ = grupo todo (raro, ex.: Iniciativa)
+ *  [ROLL: SAB DC 15 vantagem @bebeto]     — vantagem/desvantagem com alvo
+ *  [ATTACK: <alvo> 1d20+5 vs AC 13 @nick] — ataque do PC (alvo = quem rola)
+ *  [SAVE: WIS DC 14 @nick]                — alias semântico de ROLL com alvo
+ *  [INITIATIVE]                           — começa combate, todos rolam iniciativa
+ *  [HP <nick> -5] / [HP <nick> +8]        — aplica dano/cura
+ *  [REWARD: 50 lb]                        — entrega Lacrimas de Bruna
  *  [REWARD ITEM: poção menor]
  *  [NPC: Anderson] [aparência] [bordão]
  *  [QUEST add: investigar a Boate]
@@ -26,8 +27,8 @@
 export type Directive =
   | { kind: "music"; mood: string }
   | { kind: "sfx"; sfx: string }
-  | { kind: "roll"; attr?: string; skill?: string; dc?: number; vantage?: "advantage" | "disadvantage" | "normal" }
-  | { kind: "attack"; alvo?: string; dice?: string; ac?: number }
+  | { kind: "roll"; attr?: string; skill?: string; dc?: number; vantage?: "advantage" | "disadvantage" | "normal"; target?: string }
+  | { kind: "attack"; alvo?: string; dice?: string; ac?: number; target?: string }
   | { kind: "initiative" }
   | { kind: "hp"; target: string; delta: number }
   | { kind: "reward"; amount?: number; item?: string }
@@ -78,24 +79,30 @@ function parseTag(tag: string, rest: string): Directive | null {
         : /desvantagem|disadvantage/i.test(rest)
           ? "disadvantage"
           : "normal";
+      const target = parseTarget(rest);
       return {
         kind: "roll",
         attr: attrMatch ? normalizeAttr(attrMatch[1]) : undefined,
         skill: skillMatch ? skillMatch[1].trim() : undefined,
         dc: dcMatch ? parseInt(dcMatch[1], 10) : undefined,
         vantage,
+        target,
       };
     }
 
     case "ATTACK": {
       const ac = (rest.match(/AC\s*(\d+)/i) || rest.match(/CA\s*(\d+)/i))?.[1];
       const dice = rest.match(/\d*d\d+(?:[+-]\d+)?/i)?.[0];
-      const alvoMatch = rest.split(/\bvs\b/i)[0]?.trim();
+      // Remove @nick e bloco "vs ..." pra extrair alvo do ataque (target da narrativa)
+      const restSemTarget = rest.replace(/@\S+/g, "").trim();
+      const alvoMatch = restSemTarget.split(/\bvs\b/i)[0]?.trim();
+      const target = parseTarget(rest);
       return {
         kind: "attack",
         alvo: alvoMatch || undefined,
         dice: dice || undefined,
         ac: ac ? parseInt(ac, 10) : undefined,
+        target,
       };
     }
 
@@ -212,6 +219,16 @@ function normalizeAttr(a: string): string {
   if (u === "WIS") return "sab";
   if (u === "CHA") return "car";
   return u.toLowerCase();
+}
+
+/**
+ * Extrai @nick (ou múltiplos @nick1 @nick2) da string da diretiva.
+ * Retorna o primeiro nick em lowercase. Se não houver @, retorna undefined.
+ * Aceita: "DC 15 @bebeto", "@yumi DC 15", "vantagem @teucu DC 15".
+ */
+function parseTarget(rest: string): string | undefined {
+  const m = rest.match(/@([a-zA-Z0-9_-]+)/);
+  return m ? m[1].toLowerCase() : undefined;
 }
 
 /**

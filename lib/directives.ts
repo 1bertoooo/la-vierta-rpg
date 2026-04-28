@@ -37,7 +37,8 @@ export type Directive =
   | { kind: "weather"; value: string }
   | { kind: "combat"; phase: "start" | "end" }
   | { kind: "level"; target: string }
-  | { kind: "inspiration"; target: string };
+  | { kind: "inspiration"; target: string }
+  | { kind: "xp"; target: string; amount: number };
 
 const TAG_RE = /\[([A-Z_]+)(?:\s*:\s*|\s+)?([^\]]*)\]/gi;
 
@@ -150,6 +151,13 @@ function parseTag(tag: string, rest: string): Directive | null {
 
     case "INSPIRATION":
       return rest ? { kind: "inspiration", target: rest.trim() } : null;
+
+    case "XP": {
+      // "bebeto 100" ou "yumi +50"
+      const m4 = rest.match(/^(.+?)\s+\+?(\d+)$/);
+      if (!m4) return null;
+      return { kind: "xp", target: m4[1].trim(), amount: parseInt(m4[2], 10) };
+    }
 
     default:
       return null;

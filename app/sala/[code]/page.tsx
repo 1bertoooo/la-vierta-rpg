@@ -194,13 +194,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [npcsConhecidos, setNpcsConhecidos] = useState<NpcItem[]>([]);
   // Iniciativa (combate) — tracker visual no topo do log durante combate
   const [iniciativa, setIniciativa] = useState<IniciativaItem[]>([]);
+  const [emCombate, setEmCombate] = useState(false);
+  // Pendência de ataque do mestre [ATTACK: ...] — botão pra rolar
+  const [pendingAttack, setPendingAttack] = useState<{ alvo: string; dice: string; ac?: number } | null>(null);
   // Anti-flicker / cleanup do timeout do mestre
   const mestreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Channel pra broadcast "Mestre invocando" entre clients (não-DB, mais rápido)
   // Tipo escapa do supabase (RealtimeChannel) — mantemos como ref opaco
   const dmChannelRef = useRef<{ send: (args: { type: string; event: string; payload?: Record<string, unknown> }) => unknown } | null>(null);
-  // Acalma TS sobre uso de iniciativa quando combate ainda não tem UI completa
-  void iniciativa;
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -373,8 +374,12 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             const { data: events } = await sb.from("combat_log").select("*").eq("session_id", sId as string).order("created_at", { ascending: true }).limit(200);
             if (!cancelled) setLog((events as LogEvent[]) || []);
 
-            const { data: sess } = await sb.from("sessions").select("current_turn_player_id").eq("id", sId).maybeSingle();
-            if (!cancelled && sess) setCurrentTurnUserId((sess as { current_turn_player_id: string | null }).current_turn_player_id);
+            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat").eq("id", sId).maybeSingle();
+            if (!cancelled && sess) {
+              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean };
+              setCurrentTurnUserId(s.current_turn_player_id);
+              setEmCombate(!!s.in_combat);
+            }
 
             // Iniciativa do combate atual (resilient se tabela ainda não migrada)
             const iniRes = await sb.from("combat_initiative").select("*").eq("session_id", sId as string).order("position", { ascending: true }).then((r) => r, () => ({ data: null }));
@@ -486,8 +491,15 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           ).on(
             "postgres_changes", { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sId}` },
             (payload) => {
-              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string };
+              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean };
               setCurrentTurnUserId(sess.current_turn_player_id);
+              if (typeof sess.in_combat === "boolean") setEmCombate(sess.in_combat);
+            }
+          ).on(
+            "postgres_changes", { event: "*", schema: "public", table: "combat_initiative", filter: `session_id=eq.${sId}` },
+            async () => {
+              const { data } = await sb.from("combat_initiative").select("*").eq("session_id", sId as string).order("position", { ascending: true });
+              if (!cancelled) setIniciativa((data as IniciativaItem[]) || []);
             }
           ).subscribe();
           unsubs.push(() => sb.removeChannel(ch2));
@@ -657,12 +669,85 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           break;
         }
         case "initiative": {
-          setTimeout(() => sfxPlay("sword"), Math.max(0, delayMs));
-          // Marcar combat=true e abrir tracker de iniciativa
+          setTimeout(async () => {
+            sfxPlay("sword");
+            if (!sessionId || !campaign) return;
+            // Auto-popula iniciativa pra todos os players da campanha (rolagem 1d20+modDES)
+            const { data: ps } = await sb.from("players")
+              .select("user_id, display_name")
+              .eq("campaign_id", campaign.id);
+            const validPs = (ps || []).filter((p) => (p as { user_id?: string }).user_id);
+            const { data: chs } = await sb.from("characters")
+              .select("user_id, name, hp_current, hp_max, ac, des_attr")
+              .eq("campaign_id", campaign.id);
+            const charMap = new Map<string, { name: string; hp_current: number; hp_max: number; ac: number; des_attr: number }>();
+            for (const c of chs || []) charMap.set((c as { user_id: string }).user_id, c as never);
+            // Limpa iniciativa anterior
+            await sb.from("combat_initiative").delete().eq("session_id", sessionId);
+            // Insere cada player com sua iniciativa rolada
+            const rows = validPs.map((p, i) => {
+              const pp = p as { user_id: string; display_name: string };
+              const ch = charMap.get(pp.user_id);
+              const desMod = ch ? Math.floor((ch.des_attr - 10) / 2) : 0;
+              const ini = 1 + Math.floor(Math.random() * 20) + desMod;
+              return {
+                session_id: sessionId,
+                actor_type: "player",
+                actor_id: pp.user_id,
+                display_name: ch?.name || pp.display_name,
+                initiative: ini,
+                position: i, // será reordenado abaixo
+                hp_current: ch?.hp_current ?? null,
+                hp_max: ch?.hp_max ?? null,
+                ac: ch?.ac ?? null,
+                is_current: false,
+              };
+            });
+            // Ordena por iniciativa desc
+            rows.sort((a, b) => b.initiative - a.initiative);
+            rows.forEach((r, i) => {
+              r.position = i;
+              r.is_current = i === 0;
+            });
+            await sb.from("combat_initiative").insert(rows);
+            await sb.from("sessions").update({ in_combat: true }).eq("id", sessionId);
+          }, Math.max(0, delayMs));
+          break;
+        }
+        case "attack": {
+          // Player que tá pegando essa diretiva pode rolar o ataque
+          if (d.dice) {
+            setTimeout(() => {
+              setPendingAttack({ alvo: d.alvo || "alvo", dice: d.dice!, ac: d.ac });
+              sfxPlay("sword");
+            }, Math.max(0, delayMs));
+          }
           break;
         }
         case "level": {
           setTimeout(() => sfxPlay("level"), Math.max(0, delayMs));
+          break;
+        }
+        case "xp": {
+          if (!campaign) break;
+          setTimeout(async () => {
+            const targetLower = d.target.toLowerCase();
+            const { data: ps } = await sb.from("players")
+              .select("user_id, display_name")
+              .eq("campaign_id", campaign.id);
+            const alvo = (ps || []).find((p) => ((p as { display_name?: string }).display_name || "").toLowerCase() === targetLower) as { user_id?: string } | undefined;
+            if (!alvo?.user_id) return;
+            const { data: ch } = await sb.from("characters")
+              .select("id, xp")
+              .eq("campaign_id", campaign.id)
+              .eq("user_id", alvo.user_id)
+              .maybeSingle();
+            if (!ch) return;
+            const chTyped = ch as { id: string; xp: number | null };
+            const novoXp = (chTyped.xp || 0) + d.amount;
+            await sb.from("characters").update({ xp: novoXp }).eq("id", chTyped.id);
+            sfxPlay("coins");
+          }, Math.max(0, delayMs));
           break;
         }
         case "inspiration": {
@@ -1158,6 +1243,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
         {/* Log */}
         <section className="flex-1 flex flex-col min-h-[60vh] max-h-[calc(100vh-120px)] lg:max-h-[calc(100vh-60px)]">
+          {/* Tracker de iniciativa — só aparece em combate */}
+          {emCombate && iniciativa.length > 0 && (
+            <IniciativaTracker iniciativa={iniciativa} myUserId={me?.id} isAdmin={isAdmin} />
+          )}
           <div className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
             {log.length === 0 && (
               <div className="text-center py-12">
@@ -1199,6 +1288,35 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               }}
                 className="px-3 py-2 rounded bg-[var(--color-dourado)]/30 border border-[var(--color-dourado)] text-[var(--color-dourado-claro)] text-xs uppercase tracking-widest hover:bg-[var(--color-dourado)]/50 flex-shrink-0">
                 Rolar: {pendingRoll.raw}
+              </button>
+            )}
+            {pendingAttack && ehMeuTurno && (
+              <button type="button" onClick={async () => {
+                // Rola ataque + compara com AC
+                const r = rolarDados(pendingAttack.dice, vantageMode);
+                if (!r) return;
+                sfxPlay("dice");
+                if (r.critical) sfxPlay("crit");
+                else if (r.fumble) sfxPlay("fumble");
+                const hit = pendingAttack.ac !== undefined ? r.total >= pendingAttack.ac : true;
+                const resultStr = pendingAttack.ac !== undefined
+                  ? `${r.total} vs CA ${pendingAttack.ac} → ${r.critical ? "⚜ CRÍTICO" : hit ? "✓ ACERTOU" : r.fumble ? "☠ ERROU CRÍTICO" : "✗ errou"}`
+                  : `${r.total}`;
+                if (hit) sfxPlay("hit");
+                await logEvent({
+                  actor_type: "player",
+                  event_type: "roll",
+                  payload: {
+                    nick: me?.nick || "viajante",
+                    text: `Ataque em ${pendingAttack.alvo}: ${pendingAttack.dice} → ${resultStr}`,
+                    result: r,
+                  },
+                });
+                setPendingAttack(null);
+                setVantageMode("normal");
+              }}
+                className="px-3 py-2 rounded bg-[var(--color-sangue)]/30 border border-[var(--color-sangue)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest hover:bg-[var(--color-sangue)]/50 flex-shrink-0">
+                ⚔ Atacar {pendingAttack.alvo}
               </button>
             )}
             <input
@@ -1459,6 +1577,16 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
         <SpellSlots char={char} />
       )}
 
+      {/* Botões de descanso (só na própria ficha, não em compact) */}
+      {!compact && (
+        <RestButtons char={char} />
+      )}
+
+      {/* XP + level up (só na própria ficha) */}
+      {!compact && typeof char.xp === "number" && (
+        <XpProgress char={char} />
+      )}
+
       <div className="grid grid-cols-3 gap-1 text-center text-xs">
         {(["for", "des", "con", "int", "sab", "car"] as const).map((k) => {
           const v = char[`${k}_attr` as const];
@@ -1526,6 +1654,82 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * IniciativaTracker — tracker visual no topo do log durante combate.
+ * Mostra avatares ordenados por iniciativa, com HP e marcador do turno atual.
+ * Admin pode avançar o turno do combate.
+ */
+function IniciativaTracker({
+  iniciativa,
+  myUserId,
+  isAdmin,
+}: {
+  iniciativa: IniciativaItem[];
+  myUserId: string | undefined;
+  isAdmin: boolean;
+}) {
+  const sorted = [...iniciativa].sort((a, b) => a.position - b.position);
+
+  async function avancarTurnoCombate() {
+    if (!isAdmin) return;
+    const sb = getSupabase();
+    const total = sorted.length;
+    if (total === 0) return;
+    const currIdx = sorted.findIndex((i) => i.is_current);
+    const nextIdx = currIdx === -1 ? 0 : (currIdx + 1) % total;
+    // Reseta is_current de todos e marca o próximo
+    await Promise.all(sorted.map((i, idx) =>
+      sb.from("combat_initiative").update({ is_current: idx === nextIdx }).eq("id", i.id)
+    ));
+    sfxPlay("turn");
+  }
+
+  async function fimDeCombate() {
+    if (!isAdmin) return;
+    const sb = getSupabase();
+    if (!sorted[0]) return;
+    await sb.from("sessions").update({ in_combat: false }).eq("id", sorted[0].session_id);
+    await sb.from("combat_initiative").delete().eq("session_id", sorted[0].session_id);
+    sfxPlay("page");
+  }
+
+  return (
+    <div className="border-b border-[var(--color-sangue)]/40 bg-[var(--color-sangue)]/10 px-4 py-2">
+      <div className="flex items-baseline justify-between mb-2">
+        <p className="text-xs uppercase tracking-widest text-[var(--color-sangue)]">⚔ Combate — Iniciativa</p>
+        {isAdmin && (
+          <div className="flex gap-2">
+            <button onClick={avancarTurnoCombate} className="text-[10px] uppercase tracking-widest text-[var(--color-dourado)] hover:text-[var(--color-dourado-claro)]">▸ Próximo</button>
+            <button onClick={fimDeCombate} className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] hover:text-[var(--color-sangue)]">⊘ Fim</button>
+          </div>
+        )}
+      </div>
+      <div className="flex gap-1.5 overflow-x-auto pb-1">
+        {sorted.map((i) => {
+          const isMine = i.actor_type === "player" && i.actor_id === myUserId;
+          return (
+            <div
+              key={i.id}
+              className={`flex-shrink-0 px-2 py-1 rounded text-center min-w-16 transition ${
+                i.is_current
+                  ? "bg-[var(--color-dourado)]/40 border border-[var(--color-dourado)] text-[var(--color-pergaminho)] ring-2 ring-[var(--color-dourado)]/60"
+                  : "bg-[var(--color-carvao)]/60 border border-[var(--color-pergaminho-velho)]/30 text-[var(--color-pergaminho-velho)]"
+              } ${isMine ? "ring-2 ring-[var(--color-vinho)]" : ""}`}
+              title={`${i.display_name} · iniciativa ${i.initiative}`}
+            >
+              <div className="text-[9px] text-[var(--color-dourado)]">{i.initiative}</div>
+              <div className="text-xs truncate max-w-20">{i.display_name.split(" ")[0]}</div>
+              {i.hp_current !== null && i.hp_max !== null && (
+                <div className="text-[9px] text-[var(--color-sangue)]">{i.hp_current}/{i.hp_max}</div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1602,6 +1806,135 @@ function DeathSavesUI({ charId, ds }: { charId: string; ds: { successes: number;
         </button>
       ) : (
         <p className="text-center text-[var(--color-sangue)] uppercase tracking-widest text-xs">Morto. Que descanse em paz.</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * RestButtons — Long e Short Rest.
+ * Long rest: HP cheio, slots resetam, exhaustion -1.
+ * Short rest: gasta 1 hit die pra recuperar 1d8+CON.
+ */
+function RestButtons({ char }: { char: Character }) {
+  async function shortRest() {
+    if (char.hp_current <= 0) return;
+    const sb = getSupabase();
+    const hd = char.hit_dice_current ?? char.level;
+    if (hd <= 0) return;
+    const conMod = Math.floor((char.con_attr - 10) / 2);
+    const cura = Math.max(1, 1 + Math.floor(Math.random() * 8) + conMod);
+    const novoHp = Math.min(char.hp_max, char.hp_current + cura);
+    await sb.from("characters").update({
+      hp_current: novoHp,
+      hit_dice_current: hd - 1,
+    }).eq("id", char.id);
+    sfxPlay("heal");
+  }
+
+  async function longRest() {
+    const sb = getSupabase();
+    // Reset spell slots: zera "used"
+    const slots = char.spell_slots || {};
+    const slotsResetados: Record<string, { max: number; used: number }> = {};
+    for (const [k, v] of Object.entries(slots)) {
+      slotsResetados[k] = { max: v.max, used: 0 };
+    }
+    // Hit dice: recupera metade do nível (mínimo 1)
+    const hdRec = Math.max(1, Math.floor(char.level / 2));
+    const novoHd = Math.min(char.level, (char.hit_dice_current ?? char.level) + hdRec);
+
+    await sb.from("characters").update({
+      hp_current: char.hp_max,
+      spell_slots: slotsResetados,
+      hit_dice_current: novoHd,
+      death_saves: { successes: 0, failures: 0, stable: false },
+    }).eq("id", char.id);
+    sfxPlay("level");
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-2">
+      <button
+        onClick={shortRest}
+        disabled={char.hp_current <= 0 || (char.hit_dice_current ?? char.level) <= 0}
+        className="px-3 py-2 rounded border border-[var(--color-pergaminho-velho)]/40 text-xs uppercase tracking-widest text-[var(--color-pergaminho)] hover:border-[var(--color-dourado)] disabled:opacity-40"
+        title="Descanso curto: gasta 1 hit die, recupera 1d8+CON HP"
+      >
+        ☾ Curto
+      </button>
+      <button
+        onClick={longRest}
+        className="px-3 py-2 rounded border border-[var(--color-dourado)]/60 text-xs uppercase tracking-widest text-[var(--color-dourado)] hover:bg-[var(--color-dourado)]/20"
+        title="Descanso longo: HP cheio, slots resetam, recupera 1/2 nível em hit dice"
+      >
+        ☽ Longo
+      </button>
+    </div>
+  );
+}
+
+/**
+ * XpProgress — barra de XP com botão de level up quando atinge threshold.
+ * D&D 5e: 0, 300, 900, 2700, 6500, 14000, ...
+ */
+const XP_THRESHOLDS = [0, 300, 900, 2700, 6500, 14000, 23000, 34000, 48000, 64000];
+function nivelDoXp(xp: number): number {
+  for (let i = XP_THRESHOLDS.length - 1; i >= 0; i--) {
+    if (xp >= XP_THRESHOLDS[i]) return i + 1;
+  }
+  return 1;
+}
+
+function XpProgress({ char }: { char: Character }) {
+  const xp = char.xp ?? 0;
+  const niv = char.level;
+  const nextNiv = niv + 1;
+  const xpAtual = XP_THRESHOLDS[niv - 1] ?? 0;
+  const xpProx = XP_THRESHOLDS[nextNiv - 1];
+  const podeSubir = xpProx !== undefined && xp >= xpProx;
+  const pct = xpProx ? Math.min(100, ((xp - xpAtual) / (xpProx - xpAtual)) * 100) : 100;
+
+  async function subirNivel() {
+    if (!podeSubir) return;
+    const sb = getSupabase();
+    const classe = CLASSES.find((c) => c.key === char.class);
+    const conMod = Math.floor((char.con_attr - 10) / 2);
+    // HP novo: rolagem do hit die + CON mod (mínimo 1)
+    const hpDie = classe?.hpDado ?? 8;
+    const ganhoHp = Math.max(1, 1 + Math.floor(Math.random() * hpDie) + conMod);
+    const novoHpMax = char.hp_max + ganhoHp;
+    // Atualiza slots
+    const novosSlots = defaultSpellSlots(char.class, nextNiv);
+    await sb.from("characters").update({
+      level: nextNiv,
+      hp_max: novoHpMax,
+      hp_current: novoHpMax,
+      hit_dice_current: nextNiv,
+      spell_slots: novosSlots,
+    }).eq("id", char.id);
+    sfxPlay("level");
+  }
+
+  return (
+    <div>
+      <div className="flex items-baseline justify-between text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-1">
+        <span>XP nível {niv}</span>
+        <span>{xp} / {xpProx ?? "max"}</span>
+      </div>
+      <div className="h-2 bg-[var(--color-carvao)] rounded-full overflow-hidden">
+        <div
+          className="h-full bg-gradient-to-r from-[var(--color-dourado)]/60 to-[var(--color-dourado)] transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {podeSubir && (
+        <button
+          onClick={subirNivel}
+          className="mt-2 w-full px-3 py-2 rounded bg-gradient-to-r from-[var(--color-vinho)] via-[var(--color-dourado)]/40 to-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest hover:from-[var(--color-vinho)] hover:to-[var(--color-vinho)] animate-pulse"
+        >
+          ⚜ Subir pro nível {nextNiv}
+        </button>
       )}
     </div>
   );

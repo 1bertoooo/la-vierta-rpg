@@ -119,6 +119,7 @@ Tamanho: **2-4 parágrafos**, 150-350 palavras. Mais em cenas-chave (boss, twist
 - \`[TIME: night]\` ou \`[WEATHER: rain]\` — muda hora/clima.
 - \`[INSPIRATION bebeto]\` — dá ponto de inspiração por bom roleplay (raro, especial).
 - \`[LEVEL UP yumi]\` — sobe nível (após XP suficiente).
+- \`[XP bebeto 100]\` — concede XP. Conquistas comuns: 50 XP. Combate fácil: 100. Difícil: 300. Boss: 500-1000.
 
 ### Regras de uso:
 - Respeita ficha (HP, slots, classe). Nunca invente magia que o jogador não tem.

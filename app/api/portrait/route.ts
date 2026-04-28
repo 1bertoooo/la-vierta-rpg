@@ -9,15 +9,36 @@ type Body = {
   quality?: "low" | "medium" | "high";
 };
 
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || "";
+const SUPABASE_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || "";
+const BUCKET = "portraits";
+
+function publicUrl(filename: string): string {
+  return `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${filename}`;
+}
+
+async function uploadToBucket(filename: string, png: ArrayBuffer): Promise<boolean> {
+  if (!SUPABASE_URL || !SUPABASE_KEY) return false;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/storage/v1/object/${BUCKET}/${filename}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        apikey: SUPABASE_KEY,
+        "Content-Type": "image/png",
+        "x-upsert": "true",
+      },
+      body: png,
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 export async function POST(req: Request) {
   try {
-    let body: Body;
-    try {
-      body = (await req.json()) as Body;
-    } catch {
-      return NextResponse.json({ error: "Body inválido" }, { status: 400 });
-    }
-    const { prompt, size = "1024x1024", quality = "low" } = body;
+    const { prompt, size = "1024x1024", quality = "low" } = (await req.json()) as Body;
     if (!prompt?.trim()) {
       return NextResponse.json({ error: "prompt vazio" }, { status: 400 });
     }
@@ -26,9 +47,8 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "OPENAI_API_KEY não configurada" }, { status: 500 });
     }
 
-    // gpt-image-1 — modelo de imagem novo, qualidade alta, custo baixo (~$0.011 low)
     const ctrl = new AbortController();
-    const tid = setTimeout(() => ctrl.abort(), 50_000);
+    const tid = setTimeout(() => ctrl.abort(), 55_000);
 
     try {
       const r = await fetch("https://api.openai.com/v1/images/generations", {
@@ -48,36 +68,30 @@ export async function POST(req: Request) {
       });
 
       const raw = await r.text();
-      let data: { data?: { b64_json?: string; url?: string }[]; error?: { message?: string } } = {};
+      let data: { data?: { b64_json?: string }[]; error?: { message?: string } } = {};
       try {
         data = raw ? JSON.parse(raw) : {};
       } catch {
-        return NextResponse.json(
-          { error: `resposta inválida ${r.status}: ${raw.slice(0, 100)}` },
-          { status: 502 }
-        );
+        return NextResponse.json({ error: `resposta inválida ${r.status}` }, { status: 502 });
       }
-
       if (!r.ok) {
-        return NextResponse.json(
-          { error: data.error?.message || `OpenAI ${r.status}` },
-          { status: 502 }
-        );
+        return NextResponse.json({ error: data.error?.message || `OpenAI ${r.status}` }, { status: 502 });
+      }
+      const b64 = data.data?.[0]?.b64_json;
+      if (!b64) {
+        return NextResponse.json({ error: "sem b64" }, { status: 502 });
       }
 
-      const item = data.data?.[0];
-      if (!item) {
-        return NextResponse.json({ error: "sem dados de imagem" }, { status: 502 });
-      }
+      // Decode b64 -> binary
+      const binary = Buffer.from(b64, "base64");
+      const filename = `portrait_${Date.now()}_${Math.random().toString(36).slice(2, 9)}.png`;
 
-      // gpt-image-1 retorna b64_json por padrão
-      if (item.b64_json) {
-        return NextResponse.json({ b64: item.b64_json, mimeType: "image/png" });
+      const uploaded = await uploadToBucket(filename, binary);
+      if (uploaded) {
+        return NextResponse.json({ url: publicUrl(filename) });
       }
-      if (item.url) {
-        return NextResponse.json({ url: item.url });
-      }
-      return NextResponse.json({ error: "formato inesperado" }, { status: 502 });
+      // Fallback: devolve b64 inline se upload falhar
+      return NextResponse.json({ b64, mimeType: "image/png" });
     } finally {
       clearTimeout(tid);
     }

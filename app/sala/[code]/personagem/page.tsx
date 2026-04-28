@@ -179,11 +179,15 @@ export default function CriacaoPage({
     }
   }
 
-  function regerarRetratos() {
+  async function regerarRetratos() {
     setRetratoEscolhido(null);
     setRetratoUrls([null, null, null, null]);
-    // Dispara os 4 em paralelo — gpt-image-1 aguenta carga
-    [0, 1, 2, 3].forEach((idx) => gerarRetratoSlot(idx));
+    setRetratoEstados(["pendente", "pendente", "pendente", "pendente"]);
+    // Sequencial: 1 por vez. ~15s cada → ~60s total.
+    // Paralelo gerava timeout no Vercel Hobby (concorrência limitada).
+    for (let i = 0; i < 4; i++) {
+      await gerarRetratoSlot(i);
+    }
   }
 
   function regerarSlot(idx: number) {

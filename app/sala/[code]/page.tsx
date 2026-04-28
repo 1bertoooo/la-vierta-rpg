@@ -999,11 +999,20 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   async function abrirCenaInicial() {
     if (!sessionId || aguardandoIA) return;
-    // Música começa imediatamente, mesmo se IA demorar/falhar
-    if (!audioMuted) {
-      audioPlayMood("tavern");
-      setMusicaTocando(true);
+    // O click do admin é uma user gesture — libera autoplay do browser.
+    // Auto-liga TTS + música. Pra desligar, o player clica nos toggles.
+    if (!ttsIsEnabled()) {
+      ttsSetEnabled(true);
+      setTtsOn(true);
     }
+    if (audioIsMuted()) {
+      audioSetMuted(false);
+      setAudioMuted(false);
+    }
+    // Música começa SÍNCRONO dentro do click handler (autoplay-friendly)
+    audioPlayMood("tavern");
+    setMusicaTocando(true);
+
     await chamarDM(DM_OPENING_PROMPT, true);
     if (players.length > 0) {
       const sb = getSupabase();

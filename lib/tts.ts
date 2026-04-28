@@ -73,7 +73,10 @@ const audioCache: Map<string, string> = new Map();
 
 export function ttsIsEnabled(): boolean {
   if (typeof window === "undefined") return false;
-  return localStorage.getItem(TTS_KEY) === "true";
+  const v = localStorage.getItem(TTS_KEY);
+  // Default ligado: só desliga se user explicitamente clicou pra desligar
+  if (v === null) return true;
+  return v === "true";
 }
 
 export function ttsSetEnabled(v: boolean) {

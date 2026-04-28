@@ -4,38 +4,43 @@ import { VALID_MOODS } from "@/lib/moods";
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-// Tracks Pixabay — proxy server-side resolve CORS
+// Tracks Kevin MacLeod (Incompetech, CC BY 4.0) — Pixabay começou retornando 403
+// Atribuição embutida no jogo (créditos no footer da landing).
+// Cada URL foi verificada (200 OK) antes de adicionar.
+const BASE = "https://incompetech.com/music/royalty-free/mp3-royaltyfree";
 const MOOD_TRACKS: Record<string, string> = {
-  tavern: "https://cdn.pixabay.com/audio/2024/02/05/audio_e0fb0d80b9.mp3",
-  dungeon: "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
-  forest: "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
-  city: "https://cdn.pixabay.com/audio/2024/02/05/audio_e0fb0d80b9.mp3",
-  desert: "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  sea: "https://cdn.pixabay.com/audio/2022/03/15/audio_92a5f54849.mp3",
-  snow: "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
-  mountain: "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
-  palace: "https://cdn.pixabay.com/audio/2022/03/15/audio_92a5f54849.mp3",
-  temple: "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
-  swamp: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  cave: "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
-  battle: "https://cdn.pixabay.com/audio/2023/07/30/audio_e1ff09da95.mp3",
-  boss: "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
-  calm: "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
-  mystery: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  romance: "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  ritual: "https://cdn.pixabay.com/audio/2023/02/28/audio_99e9d4d4ca.mp3",
-  tragic: "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  victory: "https://cdn.pixabay.com/audio/2023/07/30/audio_e1ff09da95.mp3",
-  chase: "https://cdn.pixabay.com/audio/2023/07/30/audio_e1ff09da95.mp3",
-  horror: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  stealth: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  epic: "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
-  dread: "https://cdn.pixabay.com/audio/2022/10/14/audio_dafd2d9bad.mp3",
-  crowd: "https://cdn.pixabay.com/audio/2024/02/05/audio_e0fb0d80b9.mp3",
-  noble: "https://cdn.pixabay.com/audio/2022/03/15/audio_92a5f54849.mp3",
-  prayer: "https://cdn.pixabay.com/audio/2024/02/22/audio_5b0ee5c9dd.mp3",
-  memory: "https://cdn.pixabay.com/audio/2022/03/24/audio_d11e87a9ec.mp3",
-  ascension: "https://cdn.pixabay.com/audio/2024/02/14/audio_e83d51c02b.mp3",
+  // Locais
+  tavern:    `${BASE}/Folk%20Round.mp3`,
+  dungeon:   `${BASE}/Dark%20Times.mp3`,
+  forest:    `${BASE}/Hidden%20Wonders.mp3`,
+  city:      `${BASE}/Achaidh%20Cheide.mp3`,
+  desert:    `${BASE}/Tafi%20Maradi.mp3`,
+  sea:       `${BASE}/Sad%20Trio.mp3`,
+  snow:      `${BASE}/Long%20Note%20Three.mp3`,
+  mountain:  `${BASE}/Ascending%20the%20Vale.mp3`,
+  palace:    `${BASE}/Egmont%20Overture.mp3`,
+  temple:    `${BASE}/Echoes%20of%20Time.mp3`,
+  swamp:     `${BASE}/Anguish.mp3`,
+  cave:      `${BASE}/Ossuary%201%20-%20A%20Beginning.mp3`,
+  // Estados
+  battle:    `${BASE}/Crusade%20-%20Heavy%20Industry.mp3`,
+  boss:      `${BASE}/Hitman.mp3`,
+  calm:      `${BASE}/Easy%20Lemon.mp3`,
+  mystery:   `${BASE}/Investigations.mp3`,
+  romance:   `${BASE}/Anamalie.mp3`,
+  ritual:    `${BASE}/Echoes%20of%20Time.mp3`,
+  tragic:    `${BASE}/Decline.mp3`,
+  victory:   `${BASE}/Heroic%20Age.mp3`,
+  chase:     `${BASE}/Volatile%20Reaction.mp3`,
+  horror:    `${BASE}/Anguish.mp3`,
+  stealth:   `${BASE}/Spy%20Glass.mp3`,
+  epic:      `${BASE}/The%20Path%20of%20the%20Goblin%20King.mp3`,
+  dread:     `${BASE}/Decline.mp3`,
+  crowd:     `${BASE}/Tafi%20Maradi.mp3`,
+  noble:     `${BASE}/Lord%20of%20the%20Land.mp3`,
+  prayer:    `${BASE}/Long%20Note%20Three.mp3`,
+  memory:    `${BASE}/Hidden%20Wonders.mp3`,
+  ascension: `${BASE}/Adventure%20Meme.mp3`,
 };
 
 export async function GET(req: NextRequest) {

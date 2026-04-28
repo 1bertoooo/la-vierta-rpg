@@ -183,9 +183,16 @@ export function audioPlayFromNarration(opts: { explicit_mood?: string | null; te
 }
 
 export function audioResumeIfBlocked() {
-  if (currentAudio && currentAudio.paused && !audioIsMuted()) {
+  if (audioIsMuted()) return;
+  if (currentAudio && currentAudio.paused) {
     log("retomando bloqueado");
     currentAudio.play().catch((e) => log("ainda bloqueado:", e.message));
+    return;
+  }
+  // Nenhum áudio iniciado ainda — começa um mood default ao primeiro click
+  if (!currentAudio && !audioIsMuted()) {
+    log("primeiro click do user — iniciando tavern");
+    audioPlayMood("tavern");
   }
 }
 

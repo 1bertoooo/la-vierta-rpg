@@ -1336,6 +1336,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           directives: data.directives,
           provider: data.provider,
           play_at: playAt,
+          round: roundNumber, // Sprint I — pra round history filter
         },
       });
 

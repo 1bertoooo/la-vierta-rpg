@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { VALID_MOODS } from "@/lib/moods";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -39,14 +40,13 @@ const MOOD_TRACKS: Record<string, string> = {
 
 export async function GET(req: NextRequest) {
   const mood = req.nextUrl.searchParams.get("mood") || "tavern";
-  const url = MOOD_TRACKS[mood];
-
-  if (!url) {
-    return new Response(JSON.stringify({ error: "mood inválido" }), {
+  if (!VALID_MOODS.has(mood)) {
+    return new Response(JSON.stringify({ error: "mood inválido", mood }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
     });
   }
+  const url = MOOD_TRACKS[mood] || MOOD_TRACKS.tavern;
 
   try {
     const r = await fetch(url, {

@@ -3,40 +3,8 @@
  * 30+ moods + auto-detecção por keyword se a IA esquecer.
  */
 
-export type Mood =
-  // — Locais —
-  | "tavern"      // taverna, bar, cantina
-  | "dungeon"     // masmorra, ruínas, cripta
-  | "forest"      // floresta, mata
-  | "city"        // cidade, mercado, praça
-  | "desert"      // deserto, dunas
-  | "sea"         // mar, navio, oceano
-  | "snow"        // gelo, montanha congelada
-  | "mountain"    // montanhas, picos
-  | "palace"      // palácio, corte real
-  | "temple"      // templo sagrado
-  | "swamp"       // pântano, manguezal
-  | "cave"        // caverna profunda
-  // — Estados / Tom —
-  | "battle"      // combate corpo a corpo
-  | "boss"        // chefão, vilão chega
-  | "calm"        // descanso, viagem tranquila
-  | "mystery"     // suspense, investigação
-  | "romance"     // íntimo, amor
-  | "ritual"      // magia, cerimônia
-  | "tragic"      // morte, despedida
-  | "victory"     // triunfo, celebração
-  | "chase"       // perseguição, fuga
-  | "horror"      // pesadelo, terror
-  | "stealth"     // furtividade, infiltração
-  | "epic"        // épico, jornada grandiosa
-  | "dread"       // pavor, mau pressentimento
-  | "crowd"       // multidão, festa, dança
-  | "noble"       // corte, etiqueta, audiência
-  | "prayer"      // oração, divino
-  | "memory"      // flashback, lembrança
-  | "ascension"   // revelação, ascensão
-  | "silence";
+import { VALID_MOODS, type Mood } from "./moods";
+export type { Mood };
 
 // Proxy local — resolve CORS do Pixabay e cache no edge da Vercel
 function moodUrl(mood: Mood): string {
@@ -193,9 +161,9 @@ export function audioPlayFromNarration(opts: { explicit_mood?: string | null; te
   if (audioIsMuted()) return;
 
   if (opts.explicit_mood) {
-    const m = opts.explicit_mood.toLowerCase() as Mood;
-    if (MOOD_TRACKS[m] !== undefined) {
-      audioPlayMood(m);
+    const m = opts.explicit_mood.toLowerCase();
+    if (VALID_MOODS.has(m)) {
+      audioPlayMood(m as Mood);
       return;
     }
   }
@@ -232,4 +200,97 @@ export function audioStop() {
 
 export function audioIsPlaying(): boolean {
   return !!(currentAudio && !currentAudio.paused);
+}
+
+// ============================================================
+// SFX (sound effects) — efeitos pontuais sobre a música ambiente
+// ============================================================
+
+export type SFX =
+  | "turn"        // tua vez
+  | "dice"        // dado rolado
+  | "crit"        // crítico (20)
+  | "fumble"      // falha crítica (1)
+  | "hit"         // ataque conecta
+  | "heal"        // cura
+  | "level"       // sobe nível
+  | "death"       // morre
+  | "door"        // porta abrindo
+  | "sword"       // espada saindo da bainha
+  | "magic"       // magia conjurada
+  | "coins"       // moedas/ouro
+  | "thunder"     // trovão (boss)
+  | "bell"        // sino (NPC bordão)
+  | "page";       // virar página (cena/capítulo)
+
+const SFX_VOLUME_KEY = "lavierta:sfx:volume";
+let sfxVolume = 0.45;
+
+const SFX_URLS: Record<SFX, string> = {
+  // Curados Pixabay/Freesound CC0 — todos curtos < 2s
+  turn:    "https://cdn.pixabay.com/audio/2022/03/15/audio_2c8d8a9bc6.mp3",
+  dice:    "https://cdn.pixabay.com/audio/2022/03/24/audio_18a2b6eef0.mp3",
+  crit:    "https://cdn.pixabay.com/audio/2022/03/15/audio_61d5b0c0db.mp3",
+  fumble:  "https://cdn.pixabay.com/audio/2022/10/14/audio_6f0ca21afa.mp3",
+  hit:     "https://cdn.pixabay.com/audio/2022/03/15/audio_2c8d8a9bc6.mp3",
+  heal:    "https://cdn.pixabay.com/audio/2022/03/15/audio_61d5b0c0db.mp3",
+  level:   "https://cdn.pixabay.com/audio/2022/03/15/audio_61d5b0c0db.mp3",
+  death:   "https://cdn.pixabay.com/audio/2022/03/24/audio_18a2b6eef0.mp3",
+  door:    "https://cdn.pixabay.com/audio/2022/10/14/audio_6f0ca21afa.mp3",
+  sword:   "https://cdn.pixabay.com/audio/2022/03/15/audio_2c8d8a9bc6.mp3",
+  magic:   "https://cdn.pixabay.com/audio/2022/03/15/audio_61d5b0c0db.mp3",
+  coins:   "https://cdn.pixabay.com/audio/2022/03/15/audio_2c8d8a9bc6.mp3",
+  thunder: "https://cdn.pixabay.com/audio/2022/10/14/audio_6f0ca21afa.mp3",
+  bell:    "https://cdn.pixabay.com/audio/2022/03/15/audio_61d5b0c0db.mp3",
+  page:    "https://cdn.pixabay.com/audio/2022/03/24/audio_18a2b6eef0.mp3",
+};
+
+const sfxCache = new Map<SFX, HTMLAudioElement>();
+
+export function sfxInit() {
+  if (typeof window === "undefined") return;
+  try {
+    const v = localStorage.getItem(SFX_VOLUME_KEY);
+    if (v) sfxVolume = parseFloat(v);
+  } catch {}
+}
+
+export function sfxSetVolume(v: number) {
+  sfxVolume = Math.max(0, Math.min(1, v));
+  if (typeof window !== "undefined") {
+    try { localStorage.setItem(SFX_VOLUME_KEY, String(sfxVolume)); } catch {}
+  }
+}
+
+export function sfxGetVolume(): number {
+  return sfxVolume;
+}
+
+/** Toca SFX por cima da música. Não bloqueia, não congela, não falha. */
+export function sfxPlay(name: SFX) {
+  if (typeof window === "undefined") return;
+  if (audioIsMuted() && sfxVolume === 0) return;
+  try {
+    let a = sfxCache.get(name);
+    if (!a) {
+      a = new Audio(SFX_URLS[name]);
+      a.preload = "auto";
+      sfxCache.set(name, a);
+    }
+    // Reseta posição pra permitir múltiplos plays rápidos
+    const inst = a.cloneNode(true) as HTMLAudioElement;
+    inst.volume = sfxVolume;
+    inst.play().catch(() => {});
+  } catch {}
+}
+
+// Pausar áudio quando aba some (poupa CPU/bateria mobile)
+if (typeof window !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && currentAudio && !currentAudio.paused) {
+      currentAudio.pause();
+    } else if (!document.hidden && currentAudio && currentAudio.paused && !audioIsMuted()) {
+      currentAudio.play().catch(() => {});
+    }
+  });
 }

@@ -20,7 +20,14 @@ import {
   audioGetVolume,
   audioResumeIfBlocked,
   audioIsPlaying,
+  sfxInit,
+  sfxPlay,
+  sfxSetVolume,
+  sfxGetVolume,
+  type SFX,
 } from "@/lib/audio";
+import { parseDirectives, stripDirectives, type Directive } from "@/lib/directives";
+import type { Vantage } from "@/lib/dados";
 
 type Player = {
   id: string;
@@ -78,6 +85,55 @@ type LogEvent = {
   created_at: string;
 };
 
+type NotaItem = {
+  id: string;
+  campaign_id: string;
+  user_id: string | null;
+  scope: "self" | "party" | "dm";
+  title: string | null;
+  body: string;
+  pinned: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+type QuestItem = {
+  id: string;
+  campaign_id: string;
+  title: string;
+  description: string | null;
+  status: "active" | "completed" | "failed";
+  created_at: string;
+};
+
+type NpcItem = {
+  id: string;
+  campaign_id: string;
+  name: string;
+  appearance: string | null;
+  bordao: string | null;
+  faction: string | null;
+  relation: number;
+  first_met_at: string;
+  last_seen_at: string | null;
+  notes: string | null;
+  portrait_url: string | null;
+};
+
+type IniciativaItem = {
+  id: string;
+  session_id: string;
+  actor_type: "player" | "npc" | "enemy";
+  actor_id: string;
+  display_name: string;
+  initiative: number;
+  position: number;
+  hp_current: number | null;
+  hp_max: number | null;
+  ac: number | null;
+  is_current: boolean;
+};
+
 const SCROLL_DELAY = 80;
 
 export default function SalaPage({ params }: { params: Promise<{ code: string }> }) {
@@ -119,6 +175,23 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [musicaTocando, setMusicaTocando] = useState(false);
   // Mestre escrevendo: aparece entre chegada da resposta e início da narração (sincroniza texto com áudio)
   const [mestreEscrevendo, setMestreEscrevendo] = useState(false);
+  // Volume SFX (separado da música)
+  const [sfxVol, setSfxVol] = useState(0.45);
+  // Toast de "tua vez"
+  const [tuaVezToast, setTuaVezToast] = useState(false);
+  // Vantagem/desvantagem da próxima rolagem
+  const [vantageMode, setVantageMode] = useState<Vantage>("normal");
+  // Pergaminhos (notas + quests + NPCs)
+  const [showPergaminhos, setShowPergaminhos] = useState(false);
+  const [notas, setNotas] = useState<NotaItem[]>([]);
+  const [quests, setQuests] = useState<QuestItem[]>([]);
+  const [npcsConhecidos, setNpcsConhecidos] = useState<NpcItem[]>([]);
+  // Iniciativa (combate) — tracker visual no topo do log durante combate
+  const [iniciativa, setIniciativa] = useState<IniciativaItem[]>([]);
+  // Anti-flicker / cleanup do timeout do mestre
+  const mestreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Acalma TS sobre uso de iniciativa quando combate ainda não tem UI completa
+  void iniciativa;
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -132,14 +205,39 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   useEffect(() => {
     setTtsOn(ttsIsEnabled());
     audioInit();
+    sfxInit();
     setAudioMuted(audioIsMuted());
     setAudioVol(audioGetVolume());
+    setSfxVol(sfxGetVolume());
 
     // Tenta retomar audio em qualquer click do user (autoplay-bypass)
     const onAnyClick = () => audioResumeIfBlocked();
     document.addEventListener("click", onAnyClick);
-    return () => document.removeEventListener("click", onAnyClick);
+    return () => {
+      document.removeEventListener("click", onAnyClick);
+      // Cleanup de timeout pendente (evita setState em componente desmontado)
+      if (mestreTimeoutRef.current) {
+        clearTimeout(mestreTimeoutRef.current);
+        mestreTimeoutRef.current = null;
+      }
+    };
   }, []);
+
+  // "Tua vez" — toca som + vibration + toast quando turno fica meu
+  const turnoAnteriorRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!me?.id || !currentTurnUserId) return;
+    if (turnoAnteriorRef.current === currentTurnUserId) return;
+    turnoAnteriorRef.current = currentTurnUserId;
+    if (currentTurnUserId === me.id) {
+      sfxPlay("turn");
+      setTuaVezToast(true);
+      if (typeof navigator !== "undefined" && navigator.vibrate) {
+        try { navigator.vibrate([60, 40, 60]); } catch {}
+      }
+      setTimeout(() => setTuaVezToast(false), 3500);
+    }
+  }, [currentTurnUserId, me?.id]);
 
   useEffect(() => {
     const sb = getSupabase();
@@ -190,26 +288,31 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           }).eq("id", existing.id);
         }
 
-        // Sessão
+        // Sessão — RPC atômico (idempotente, evita criar duplicada quando 2 abrem ao mesmo tempo)
         let sId: string | null = null;
-        const { data: existingSession } = await sb
-          .from("sessions")
-          .select("id, current_turn_player_id")
-          .eq("campaign_id", camp.id)
-          .is("ended_at", null)
-          .order("started_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-        if (existingSession) {
-          sId = (existingSession as { id: string }).id;
-          // Pega current_turn (será carregado de novo no reload)
+        const { data: rpcSId, error: rpcErr } = await sb.rpc("get_or_create_current_session", { p_campaign_id: camp.id });
+        if (!rpcErr && rpcSId) {
+          sId = rpcSId as string;
         } else {
-          const { data: newSess } = await sb
+          // Fallback se RPC ainda não existe
+          const { data: existingSession } = await sb
             .from("sessions")
-            .insert({ campaign_id: camp.id, session_number: 1, music_mood: "tavern" })
-            .select("id")
+            .select("id, current_turn_player_id")
+            .eq("campaign_id", camp.id)
+            .is("ended_at", null)
+            .order("started_at", { ascending: false })
+            .limit(1)
             .maybeSingle();
-          if (newSess) sId = (newSess as { id: string }).id;
+          if (existingSession) {
+            sId = (existingSession as { id: string }).id;
+          } else {
+            const { data: newSess } = await sb
+              .from("sessions")
+              .insert({ campaign_id: camp.id, session_number: 1, music_mood: "tavern" })
+              .select("id")
+              .maybeSingle();
+            if (newSess) sId = (newSess as { id: string }).id;
+          }
         }
         if (cancelled) return;
         setSessionId(sId);
@@ -232,6 +335,23 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
             const { data: sess } = await sb.from("sessions").select("current_turn_player_id").eq("id", sId).maybeSingle();
             if (!cancelled && sess) setCurrentTurnUserId((sess as { current_turn_player_id: string | null }).current_turn_player_id);
+
+            // Iniciativa do combate atual (resilient se tabela ainda não migrada)
+            const iniRes = await sb.from("combat_initiative").select("*").eq("session_id", sId as string).order("position", { ascending: true }).then((r) => r, () => ({ data: null }));
+            if (!cancelled) setIniciativa((iniRes.data as IniciativaItem[]) || []);
+          }
+
+          // Pergaminhos: notas + quests + NPCs (não dependem de sessão).
+          // Resilient: se tabelas novas ainda não foram migradas, vazia é ok.
+          const [notasR, questsR, npcsR] = await Promise.all([
+            sb.from("notes").select("*").eq("campaign_id", camp.id).order("pinned", { ascending: false }).order("updated_at", { ascending: false }).then((r) => r, () => ({ data: null })),
+            sb.from("quests").select("*").eq("campaign_id", camp.id).order("created_at", { ascending: false }).then((r) => r, () => ({ data: null })),
+            sb.from("npc_journal").select("*").eq("campaign_id", camp.id).order("last_seen_at", { ascending: false, nullsFirst: false }).then((r) => r, () => ({ data: null })),
+          ]);
+          if (!cancelled) {
+            setNotas((notasR.data as NotaItem[]) || []);
+            setQuests((questsR.data as QuestItem[]) || []);
+            setNpcsConhecidos((npcsR.data as NpcItem[]) || []);
           }
         };
 
@@ -241,6 +361,24 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           "postgres_changes", { event: "*", schema: "public", table: "players", filter: `campaign_id=eq.${camp.id}` }, () => reloadAll()
         ).on(
           "postgres_changes", { event: "*", schema: "public", table: "characters", filter: `campaign_id=eq.${camp.id}` }, () => reloadAll()
+        ).on(
+          "postgres_changes", { event: "*", schema: "public", table: "notes", filter: `campaign_id=eq.${camp.id}` },
+          async () => {
+            const { data } = await sb.from("notes").select("*").eq("campaign_id", camp.id).order("pinned", { ascending: false }).order("updated_at", { ascending: false });
+            if (!cancelled) setNotas((data as NotaItem[]) || []);
+          }
+        ).on(
+          "postgres_changes", { event: "*", schema: "public", table: "quests", filter: `campaign_id=eq.${camp.id}` },
+          async () => {
+            const { data } = await sb.from("quests").select("*").eq("campaign_id", camp.id).order("created_at", { ascending: false });
+            if (!cancelled) setQuests((data as QuestItem[]) || []);
+          }
+        ).on(
+          "postgres_changes", { event: "*", schema: "public", table: "npc_journal", filter: `campaign_id=eq.${camp.id}` },
+          async () => {
+            const { data } = await sb.from("npc_journal").select("*").eq("campaign_id", camp.id).order("last_seen_at", { ascending: false, nullsFirst: false });
+            if (!cancelled) setNpcsConhecidos((data as NpcItem[]) || []);
+          }
         ).subscribe();
         unsubs.push(() => sb.removeChannel(ch1));
 
@@ -249,41 +387,60 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             "postgres_changes", { event: "INSERT", schema: "public", table: "combat_log", filter: `session_id=eq.${sId}` },
             (payload) => {
               const ev = payload.new as LogEvent;
-              const directives = (ev.payload as { directives?: { roll?: string; music_mood?: string } })?.directives;
               const isDmNarration = ev.actor_type === "dm" && ev.event_type === "narration";
 
+              // Parse diretivas do texto (novo formato unificado)
+              const txt = (ev.payload.text as string) || "";
+              const directivesParsed = isDmNarration ? parseDirectives(txt) : [];
+
+              const rollDir = directivesParsed.find((d) => d.kind === "roll");
+              const musicDir = directivesParsed.find((d) => d.kind === "music");
+
+              // Helper de adição com de-dup por id (evita reentrega em reconexão)
+              const addLog = (newEv: LogEvent) =>
+                setLog((prev) => (prev.some((e) => e.id === newEv.id) ? prev : [...prev, newEv]));
+
               if (isDmNarration) {
-                const txt = (ev.payload.text as string) || "";
                 const playAt = ev.payload.play_at as number | undefined;
-                const delay = playAt ? Math.max(0, playAt - Date.now()) : 0;
+                const created = new Date(ev.created_at).getTime();
+                // Usa server timestamp (created_at) + offset fixo, robusto a clock skew
+                const targetAt = playAt ?? created + 4000;
+                const delay = Math.max(0, targetAt - Date.now());
 
-                // TTS já lida com play_at internamente (preload + setTimeout)
-                if (ttsIsEnabled()) ttsSpeak(txt, playAt ? { playAt } : undefined);
+                // TTS sincronizado
+                if (ttsIsEnabled()) ttsSpeak(txt, { playAt: targetAt });
 
-                // Música começa imediatamente — atmosfera vai à frente do texto
-                audioPlayFromNarration({ explicit_mood: directives?.music_mood ?? null, text: txt });
+                // Música pelo diretivo OU auto-detect (ambos ou nenhum funciona)
+                audioPlayFromNarration({ explicit_mood: musicDir?.mood ?? null, text: txt });
+
+                // Aplica diretivas mecânicas (HP, SFX, NPC, QUEST etc)
+                aplicarDiretivas(directivesParsed, delay);
 
                 if (delay > 200) {
-                  // Adia a aparição do texto até o áudio começar — sincroniza voz e leitura
                   setMestreEscrevendo(true);
-                  setAguardandoIA(false); // transição suave: o loader continua via mestreEscrevendo
-                  setTimeout(() => {
-                    setLog((prev) => [...prev, ev]);
+                  setAguardandoIA(false);
+                  if (mestreTimeoutRef.current) clearTimeout(mestreTimeoutRef.current);
+                  mestreTimeoutRef.current = setTimeout(() => {
+                    addLog(ev);
                     setMestreEscrevendo(false);
-                    if (directives?.roll) setPendingRoll({ raw: directives.roll, rolled: false });
+                    if (rollDir) setPendingRoll({
+                      raw: `${rollDir.attr || "1d20"}${rollDir.dc ? ` DC ${rollDir.dc}` : ""}${rollDir.vantage && rollDir.vantage !== "normal" ? ` ${rollDir.vantage === "advantage" ? "vantagem" : "desvantagem"}` : ""}`,
+                      rolled: false,
+                    });
+                    if (rollDir?.vantage === "advantage") setVantageMode("advantage");
+                    else if (rollDir?.vantage === "disadvantage") setVantageMode("disadvantage");
+                    mestreTimeoutRef.current = null;
                   }, delay);
                 } else {
-                  // Sem play_at ou já passou — mostra na hora
-                  setLog((prev) => [...prev, ev]);
+                  addLog(ev);
                   setAguardandoIA(false);
-                  if (directives?.roll) setPendingRoll({ raw: directives.roll, rolled: false });
+                  if (rollDir) setPendingRoll({
+                    raw: `${rollDir.attr || "1d20"}${rollDir.dc ? ` DC ${rollDir.dc}` : ""}`,
+                    rolled: false,
+                  });
                 }
               } else {
-                // Eventos não-narração (player, system, npc, dados): aparecem imediatamente
-                setLog((prev) => [...prev, ev]);
-                if (ev.actor_type === "dm" && directives?.roll) {
-                  setPendingRoll({ raw: directives.roll, rolled: false });
-                }
+                addLog(ev);
               }
             }
           ).on(
@@ -330,15 +487,138 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     });
   }
 
+  /** Avança turno via RPC atômico — evita race condition entre clients */
   async function setTurnoProximo() {
     if (!sessionId || players.length === 0) return;
-    const playersComUserId = players.filter((p) => p.user_id);
-    if (playersComUserId.length === 0) return;
-    const idxAtual = playersComUserId.findIndex((p) => p.user_id === currentTurnUserId);
-    const proxIdx = idxAtual === -1 ? 0 : (idxAtual + 1) % playersComUserId.length;
-    const proxUserId = playersComUserId[proxIdx].user_id;
     const sb = getSupabase();
-    await sb.from("sessions").update({ current_turn_player_id: proxUserId }).eq("id", sessionId);
+    // Tenta RPC novo (atômico); fallback pra UPDATE se RPC ainda não existe
+    const { error } = await sb.rpc("advance_turn", { p_session_id: sessionId });
+    if (error) {
+      // Fallback (migration 0009 não rodada ainda)
+      const playersComUserId = players.filter((p) => p.user_id);
+      if (playersComUserId.length === 0) return;
+      const idxAtual = playersComUserId.findIndex((p) => p.user_id === currentTurnUserId);
+      const proxIdx = idxAtual === -1 ? 0 : (idxAtual + 1) % playersComUserId.length;
+      const proxUserId = playersComUserId[proxIdx].user_id;
+      await sb.from("sessions").update({ current_turn_player_id: proxUserId }).eq("id", sessionId);
+    }
+  }
+
+  /** Aplica diretivas mecânicas que vieram do Mestre (HP, SFX, NPC, QUEST etc) */
+  function aplicarDiretivas(dirs: Directive[], delayMs: number) {
+    const sb = getSupabase();
+    for (const d of dirs) {
+      switch (d.kind) {
+        case "sfx": {
+          // SFX toca sincronizado com o áudio (mesmo delay)
+          setTimeout(() => sfxPlay(d.sfx as SFX), Math.max(0, delayMs));
+          break;
+        }
+        case "hp": {
+          // Aplica HP delta no character do nick alvo (case-insensitive).
+          // Faz query ao banco (não a state) pra evitar stale closure.
+          if (!campaign) break;
+          setTimeout(async () => {
+            const targetLower = d.target.toLowerCase();
+            const { data: ps } = await sb.from("players")
+              .select("user_id, display_name")
+              .eq("campaign_id", campaign.id);
+            const alvo = (ps || []).find((p) => ((p as { display_name?: string }).display_name || "").toLowerCase() === targetLower) as { user_id?: string } | undefined;
+            if (!alvo?.user_id) return;
+            const { data: ch } = await sb.from("characters")
+              .select("id, hp_current, hp_max")
+              .eq("campaign_id", campaign.id)
+              .eq("user_id", alvo.user_id)
+              .maybeSingle();
+            if (!ch) return;
+            const chTyped = ch as { id: string; hp_current: number; hp_max: number };
+            const novoHp = Math.max(0, Math.min(chTyped.hp_max, chTyped.hp_current + d.delta));
+            await sb.from("characters").update({ hp_current: novoHp }).eq("id", chTyped.id);
+            if (d.delta < 0) sfxPlay("hit");
+            else if (d.delta > 0) sfxPlay("heal");
+            if (novoHp === 0) sfxPlay("death");
+          }, Math.max(0, delayMs));
+          break;
+        }
+        case "quest": {
+          if (!campaign) break;
+          setTimeout(async () => {
+            if (d.action === "add") {
+              await sb.from("quests").insert({
+                campaign_id: campaign.id,
+                title: d.title.slice(0, 200),
+                status: "active",
+              });
+              sfxPlay("page");
+            } else if (d.action === "done") {
+              await sb.from("quests")
+                .update({ status: "completed", completed_at: new Date().toISOString() })
+                .eq("campaign_id", campaign.id)
+                .eq("title", d.title.slice(0, 200));
+              sfxPlay("level");
+            }
+          }, Math.max(0, delayMs));
+          break;
+        }
+        case "npc": {
+          if (!campaign || !d.name) break;
+          setTimeout(async () => {
+            await sb.from("npc_journal").upsert({
+              campaign_id: campaign.id,
+              name: d.name.slice(0, 80),
+              appearance: d.appearance?.slice(0, 200) || null,
+              bordao: d.bordao?.slice(0, 200) || null,
+              last_seen_at: new Date().toISOString(),
+            }, { onConflict: "campaign_id,name" });
+            sfxPlay("bell");
+          }, Math.max(0, delayMs));
+          break;
+        }
+        case "reward": {
+          // Reward é registrada no log, aplicação manual depois
+          if (d.amount) setTimeout(() => sfxPlay("coins"), Math.max(0, delayMs));
+          break;
+        }
+        case "combat": {
+          if (d.phase === "start") {
+            setTimeout(() => sfxPlay("sword"), Math.max(0, delayMs));
+            setTimeout(async () => {
+              if (sessionId) await sb.from("sessions").update({ in_combat: true }).eq("id", sessionId);
+            }, Math.max(0, delayMs));
+          } else {
+            setTimeout(async () => {
+              if (sessionId) await sb.from("sessions").update({ in_combat: false }).eq("id", sessionId);
+            }, Math.max(0, delayMs));
+          }
+          break;
+        }
+        case "initiative": {
+          setTimeout(() => sfxPlay("sword"), Math.max(0, delayMs));
+          // Marcar combat=true e abrir tracker de iniciativa
+          break;
+        }
+        case "level": {
+          setTimeout(() => sfxPlay("level"), Math.max(0, delayMs));
+          break;
+        }
+        case "inspiration": {
+          setTimeout(() => sfxPlay("bell"), Math.max(0, delayMs));
+          break;
+        }
+        case "time":
+        case "weather": {
+          if (sessionId) {
+            setTimeout(async () => {
+              const update: Record<string, string> = {};
+              if (d.kind === "time") update.time_of_day = d.value;
+              else update.weather = d.value;
+              await sb.from("sessions").update(update).eq("id", sessionId);
+            }, Math.max(0, delayMs));
+          }
+          break;
+        }
+      }
+    }
   }
 
   async function chamarDM(prompt: string, isOpening = false) {
@@ -401,7 +681,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       });
       // Captura resposta como texto antes de parsear — pra não dar JSON parse error
       const raw = await r.text();
-      let data: { error?: string; details?: string[]; text?: string; directives?: { roll?: string; music_mood?: string } } = {};
+      let data: { error?: string; details?: string[]; text?: string; directives?: { roll?: string; music_mood?: string }; provider?: string } = {};
       try {
         data = raw ? JSON.parse(raw) : {};
       } catch {
@@ -416,22 +696,27 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         throw new Error("Mestre não respondeu (texto vazio)");
       }
 
-      const textLimpo = (data.text as string)
-        .replace(/\[ROLL:[^\]]+\]/gi, "")
-        .replace(/\[COMBATE INICIA\]/gi, "")
-        .replace(/\[MUSICA:[^\]]+\]/gi, "")
-        .trim();
+      // O texto cru vai pro DB com diretivas embutidas — o realtime parser cuida.
+      // Mas mantemos uma versão limpa pra exibir (pra evitar [TAG] aparecer pro player).
+      const textComDirs = (data.text as string).trim();
 
       // Sincronização: marca timestamp futuro de 5s pra todos os clients tocarem juntos
       const playAt = Date.now() + 5000;
       await logEvent({
         actor_type: "dm",
         event_type: "narration",
-        payload: { text: textLimpo, directives: data.directives, provider: data.provider, play_at: playAt },
+        payload: {
+          text: textComDirs, // texto cru com diretivas — parser do client extrai
+          directives: data.directives,
+          provider: data.provider,
+          play_at: playAt,
+        },
       });
 
       // Avança turno automaticamente após resposta da IA (se não pediu roll)
-      if (!isOpening && !data.directives?.roll) {
+      const dirs = parseDirectives(textComDirs);
+      const pediuRoll = dirs.some((d) => d.kind === "roll" || d.kind === "attack" || d.kind === "initiative");
+      if (!isOpening && !pediuRoll) {
         await setTurnoProximo();
       }
     } catch (e) {
@@ -446,22 +731,30 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     }
   }
 
-  async function rolarDado(expr: string, contexto?: string) {
-    const r = rolarDados(expr);
+  async function rolarDado(expr: string, contexto?: string, vantage: Vantage = "normal") {
+    const efetivaVantage = vantage !== "normal" ? vantage : vantageMode;
+    const r = rolarDados(expr, efetivaVantage);
     if (!r) return;
+    sfxPlay("dice");
+    if (r.critical) sfxPlay("crit");
+    else if (r.fumble) sfxPlay("fumble");
+    const vantageStr = r.bothD20
+      ? ` (${r.vantage === "advantage" ? "vantagem" : "desvantagem"}: ${r.bothD20[0]} ${r.vantage === "advantage" ? "↑" : "↓"} ${r.bothD20[1]})`
+      : "";
     await logEvent({
       actor_type: "player",
       event_type: "roll",
       payload: {
         nick: me?.nick || "viajante",
         text: contexto
-          ? `${contexto}: ${expr} → ${r.total}${r.critical ? " ⚜ CRÍTICO" : r.fumble ? " ☠ falha crítica" : ""}`
-          : `${expr} → ${r.total}`,
+          ? `${contexto}: ${expr}${vantageStr} → ${r.total}${r.critical ? " ⚜ CRÍTICO" : r.fumble ? " ☠ falha crítica" : ""}`
+          : `${expr}${vantageStr} → ${r.total}`,
         result: r,
       },
     });
     setShowDados(false);
     if (pendingRoll) setPendingRoll({ ...pendingRoll, rolled: true });
+    setVantageMode("normal"); // reseta após rolar
   }
 
   function rolarComMod(expr: string, modKey?: "for" | "des" | "con" | "int" | "sab" | "car") {
@@ -502,7 +795,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   async function enviarAcao(e?: React.FormEvent) {
     e?.preventDefault();
-    const txt = acaoTexto.trim();
+    const txt = acaoTexto.trim().slice(0, 1000); // hard limit 1000 chars
     if (!txt || aguardandoIA) return;
     if (!ehMeuTurno) return;
     setAcaoTexto("");
@@ -664,6 +957,15 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           </button>
           <button onClick={replayUltimaNarracao} title="Repetir última narração"
             className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">↻</button>
+          <button onClick={() => setShowPergaminhos(true)} title="Pergaminhos: notas, missões, NPCs"
+            className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] relative">
+            📜
+            {(quests.filter((q) => q.status === "active").length > 0) && (
+              <span className="absolute -top-1 -right-2 bg-[var(--color-dourado)] text-[var(--color-carvao)] text-[8px] rounded-full px-1 leading-none py-0.5">
+                {quests.filter((q) => q.status === "active").length}
+              </span>
+            )}
+          </button>
           <div className="relative">
             <button onClick={() => setShowAudioPanel((s) => !s)} title="Música"
               className={`text-xs uppercase tracking-widest transition ${musicaTocando ? "text-[var(--color-dourado)] animate-pulse" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>
@@ -681,8 +983,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 >
                   {audioMuted ? "▶ Tocar música" : musicaTocando ? "⏸ Silenciar" : "▶ Retomar (autoplay bloqueado — clica)"}
                 </button>
-                <label className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] block mb-1">Volume</label>
+                <label className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] block mb-1">Música</label>
                 <input type="range" min="0" max="1" step="0.05" value={audioVol} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-full" />
+                <label className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] block mb-1 mt-3">SFX</label>
+                <input type="range" min="0" max="1" step="0.05" value={sfxVol} onChange={(e) => { const v = parseFloat(e.target.value); setSfxVol(v); sfxSetVolume(v); }} className="w-full" />
                 <p className="text-[10px] text-[var(--color-pedra)] mt-3 italic">A trilha muda conforme a cena.</p>
               </div>
             )}
@@ -783,7 +1087,16 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               🎲
             </button>
             {pendingRoll && !pendingRoll.rolled && ehMeuTurno && (
-              <button type="button" onClick={() => rolarComMod("1d20")}
+              <button type="button" onClick={() => {
+                // Parse atributo da diretriz (FOR/DES/CON/INT/SAB/CAR ou STR/DEX/etc)
+                const m = pendingRoll.raw.match(/\b(for|des|con|int|sab|car|str|dex|wis|cha)\b/i);
+                let attrKey: "for" | "des" | "con" | "int" | "sab" | "car" | undefined;
+                if (m) {
+                  const a = m[1].toLowerCase();
+                  attrKey = (a === "str" ? "for" : a === "dex" ? "des" : a === "wis" ? "sab" : a === "cha" ? "car" : a) as typeof attrKey;
+                }
+                rolarComMod("1d20", attrKey);
+              }}
                 className="px-3 py-2 rounded bg-[var(--color-dourado)]/30 border border-[var(--color-dourado)] text-[var(--color-dourado-claro)] text-xs uppercase tracking-widest hover:bg-[var(--color-dourado)]/50 flex-shrink-0">
                 Rolar: {pendingRoll.raw}
               </button>
@@ -791,11 +1104,17 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             <input
               type="text"
               value={acaoTexto}
-              onChange={(e) => setAcaoTexto(e.target.value)}
+              maxLength={1000}
+              onChange={(e) => setAcaoTexto(e.target.value.slice(0, 1000))}
               placeholder={ehMeuTurno ? "Tua vez. Descreve a ação…" : `Aguardando ${players.find((p) => p.user_id === currentTurnUserId)?.display_name || "outro jogador"}…`}
               disabled={aguardandoIA || !ehMeuTurno}
               className="flex-1 px-3 py-2 rounded bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] focus:outline-none focus:border-[var(--color-dourado)] text-sm disabled:opacity-50"
             />
+            {acaoTexto.length > 800 && (
+              <span className="text-[10px] text-[var(--color-pergaminho-velho)] self-center hidden sm:inline">
+                {acaoTexto.length}/1000
+              </span>
+            )}
             <button type="submit" disabled={!acaoTexto.trim() || aguardandoIA || !ehMeuTurno}
               className="px-4 py-2 rounded bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest hover:bg-[var(--color-sangue)] disabled:opacity-40 flex-shrink-0">
               Falar
@@ -816,9 +1135,29 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
       {/* Modal dados */}
       {showDados && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-6">
-          <div className="bg-[var(--color-carvao)] border border-[var(--color-dourado)] rounded-lg p-6 max-w-md w-full">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-6" onClick={() => setShowDados(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="bg-[var(--color-carvao)] border border-[var(--color-dourado)] rounded-lg p-6 max-w-md w-full">
             <h2 className="text-xl text-[var(--color-dourado)] mb-4 font-[family-name:var(--font-cinzel)]">Rolar dados</h2>
+
+            {/* Vantagem / Normal / Desvantagem */}
+            <div className="grid grid-cols-3 gap-1 mb-4 p-1 bg-[var(--color-carvao)]/80 rounded border border-[var(--color-pergaminho-velho)]/20">
+              {([
+                { v: "advantage", label: "Vantagem", cor: "text-emerald-400 border-emerald-400/60" },
+                { v: "normal",    label: "Normal",   cor: "text-[var(--color-pergaminho)] border-[var(--color-pergaminho-velho)]/40" },
+                { v: "disadvantage", label: "Desvantagem", cor: "text-red-400 border-red-400/60" },
+              ] as const).map((opt) => (
+                <button
+                  key={opt.v}
+                  onClick={() => setVantageMode(opt.v)}
+                  className={`px-2 py-1.5 rounded text-[10px] uppercase tracking-widest border ${
+                    vantageMode === opt.v ? `${opt.cor} bg-[var(--color-vinho)]/30` : "text-[var(--color-pergaminho-velho)] border-transparent hover:border-[var(--color-pergaminho-velho)]/40"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+
             <div className="grid grid-cols-4 gap-2 mb-4">
               {DADOS_PADRAO.map((d) => (
                 <button key={d.label} onClick={() => rolarDado(d.expr)}
@@ -854,6 +1193,39 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         </div>
       )}
 
+      {/* Toast: TUA VEZ */}
+      {tuaVezToast && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-[60] pointer-events-none animate-[tuaVez_3.5s_ease-out]">
+          <div className="bg-gradient-to-r from-[var(--color-vinho)] via-[var(--color-dourado)]/90 to-[var(--color-vinho)] border-2 border-[var(--color-dourado)] rounded-lg px-8 py-3 shadow-2xl">
+            <p className="text-2xl text-[var(--color-carvao)] font-[family-name:var(--font-cinzel)] uppercase tracking-widest font-bold">
+              Tua vez, {me?.nick}
+            </p>
+          </div>
+          <style jsx>{`
+            @keyframes tuaVez {
+              0%   { opacity: 0; transform: translate(-50%, -20px) scale(0.85); }
+              10%  { opacity: 1; transform: translate(-50%, 0) scale(1.05); }
+              20%  { transform: translate(-50%, 0) scale(1); }
+              80%  { opacity: 1; transform: translate(-50%, 0) scale(1); }
+              100% { opacity: 0; transform: translate(-50%, -10px) scale(0.95); }
+            }
+          `}</style>
+        </div>
+      )}
+
+      {/* Modal Pergaminhos: notas + quests + NPCs */}
+      {showPergaminhos && me && campaign && (
+        <Pergaminhos
+          campaignId={campaign.id}
+          userId={me.id}
+          isAdmin={isAdmin}
+          notas={notas}
+          quests={quests}
+          npcs={npcsConhecidos}
+          onClose={() => setShowPergaminhos(false)}
+        />
+      )}
+
       {/* Modal reset */}
       {showResetModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-6">
@@ -884,7 +1256,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
 function LogEntry({ ev, myUserId, onReplay }: { ev: LogEvent; myUserId: string | undefined; onReplay: (text: string) => void }) {
   if (ev.actor_type === "dm") {
-    const text = (ev.payload.text as string) || "";
+    const textRaw = (ev.payload.text as string) || "";
+    // Remove diretivas [TAG] e [TAG: ...] da exibição (continuam sendo processadas)
+    const text = stripDirectives(textRaw);
     const provider = (ev.payload.provider as string) || "";
     return (
       <div className="border-l-2 border-[var(--color-dourado)] pl-4 py-1 group">
@@ -1023,6 +1397,225 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Pergaminhos: aba unificada com Notas, Missões e NPCs conhecidos.
+ * Notas têm 3 escopos: pessoal (só eu), party (todos), DM (admin).
+ */
+function Pergaminhos({
+  campaignId,
+  userId,
+  isAdmin,
+  notas,
+  quests,
+  npcs,
+  onClose,
+}: {
+  campaignId: string;
+  userId: string;
+  isAdmin: boolean;
+  notas: NotaItem[];
+  quests: QuestItem[];
+  npcs: NpcItem[];
+  onClose: () => void;
+}) {
+  const [aba, setAba] = useState<"notas" | "quests" | "npcs">("quests");
+  const [novaNota, setNovaNota] = useState("");
+  const [novoEscopo, setNovoEscopo] = useState<"self" | "party" | "dm">("self");
+  const [novaQuest, setNovaQuest] = useState("");
+
+  async function adicionarNota() {
+    if (!novaNota.trim()) return;
+    const sb = getSupabase();
+    await sb.from("notes").insert({
+      campaign_id: campaignId,
+      user_id: userId,
+      scope: novoEscopo,
+      body: novaNota.trim().slice(0, 5000),
+    });
+    setNovaNota("");
+  }
+
+  async function deletarNota(id: string) {
+    const sb = getSupabase();
+    await sb.from("notes").delete().eq("id", id);
+  }
+
+  async function pinNota(id: string, atual: boolean) {
+    const sb = getSupabase();
+    await sb.from("notes").update({ pinned: !atual, updated_at: new Date().toISOString() }).eq("id", id);
+  }
+
+  async function adicionarQuest() {
+    if (!isAdmin || !novaQuest.trim()) return;
+    const sb = getSupabase();
+    await sb.from("quests").insert({
+      campaign_id: campaignId,
+      title: novaQuest.trim().slice(0, 200),
+      status: "active",
+    });
+    setNovaQuest("");
+  }
+
+  async function toggleQuest(q: QuestItem) {
+    if (!isAdmin) return;
+    const sb = getSupabase();
+    await sb.from("quests").update({
+      status: q.status === "active" ? "completed" : "active",
+      completed_at: q.status === "active" ? new Date().toISOString() : null,
+    }).eq("id", q.id);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-4" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="bg-[var(--color-carvao)] border border-[var(--color-dourado)] rounded-lg max-w-2xl w-full max-h-[90vh] flex flex-col">
+        <div className="flex items-baseline justify-between p-5 border-b border-[var(--color-pergaminho-velho)]/20">
+          <h2 className="text-xl text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">📜 Pergaminhos</h2>
+          <button onClick={onClose} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-2xl leading-none">×</button>
+        </div>
+
+        {/* Tabs */}
+        <div className="flex border-b border-[var(--color-pergaminho-velho)]/20">
+          {([
+            { k: "quests", label: `Missões (${quests.filter((q) => q.status === "active").length})` },
+            { k: "notas",  label: `Notas (${notas.length})` },
+            { k: "npcs",   label: `NPCs (${npcs.length})` },
+          ] as const).map((t) => (
+            <button
+              key={t.k}
+              onClick={() => setAba(t.k)}
+              className={`flex-1 px-4 py-3 text-xs uppercase tracking-widest transition ${
+                aba === t.k
+                  ? "text-[var(--color-dourado)] border-b-2 border-[var(--color-dourado)]"
+                  : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-5 space-y-3">
+          {aba === "quests" && (
+            <>
+              {quests.length === 0 && <p className="text-[var(--color-pergaminho-velho)] italic text-sm text-center py-6">Nenhum pergaminho ainda. O Mestre dirá qual é o próximo passo.</p>}
+              {quests.map((q) => (
+                <div key={q.id} className={`p-3 rounded border ${q.status === "completed" ? "border-[var(--color-pergaminho-velho)]/20 opacity-60" : "border-[var(--color-dourado)]/40 bg-[var(--color-vinho)]/10"}`}>
+                  <div className="flex items-start gap-3">
+                    {isAdmin ? (
+                      <button onClick={() => toggleQuest(q)} className="mt-1 text-[var(--color-dourado)] hover:text-[var(--color-dourado-claro)]">
+                        {q.status === "completed" ? "✓" : "○"}
+                      </button>
+                    ) : (
+                      <span className="mt-1 text-[var(--color-dourado)]">{q.status === "completed" ? "✓" : "○"}</span>
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm ${q.status === "completed" ? "line-through text-[var(--color-pergaminho-velho)]" : "text-[var(--color-pergaminho)]"}`}>
+                        {q.title}
+                      </p>
+                      {q.description && <p className="text-xs text-[var(--color-pergaminho-velho)] italic mt-1">{q.description}</p>}
+                    </div>
+                  </div>
+                </div>
+              ))}
+              {isAdmin && (
+                <div className="flex gap-2 pt-2">
+                  <input
+                    type="text"
+                    value={novaQuest}
+                    onChange={(e) => setNovaQuest(e.target.value)}
+                    placeholder="Nova missão (admin)…"
+                    maxLength={200}
+                    className="flex-1 px-3 py-2 rounded bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/40 text-sm text-[var(--color-pergaminho)]"
+                  />
+                  <button onClick={adicionarQuest} className="px-3 py-2 rounded bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase">Add</button>
+                </div>
+              )}
+            </>
+          )}
+
+          {aba === "notas" && (
+            <>
+              {notas.length === 0 && <p className="text-[var(--color-pergaminho-velho)] italic text-sm text-center py-6">Nenhuma nota. Anota o que vai esquecendo.</p>}
+              {notas.filter((n) => n.scope !== "dm" || isAdmin).map((n) => (
+                <div key={n.id} className={`p-3 rounded border ${n.pinned ? "border-[var(--color-dourado)]/60 bg-[var(--color-vinho)]/10" : "border-[var(--color-pergaminho-velho)]/20"}`}>
+                  <div className="flex items-baseline justify-between gap-2 mb-1">
+                    <span className={`text-[10px] uppercase tracking-widest ${
+                      n.scope === "party" ? "text-emerald-400" : n.scope === "dm" ? "text-[var(--color-sangue)]" : "text-[var(--color-pergaminho-velho)]"
+                    }`}>
+                      {n.scope === "party" ? "Party" : n.scope === "dm" ? "Mestre" : "Pessoal"}
+                    </span>
+                    <div className="flex gap-1">
+                      {n.user_id === userId && (
+                        <>
+                          <button onClick={() => pinNota(n.id, n.pinned)} className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]" title={n.pinned ? "Desfixar" : "Fixar"}>
+                            {n.pinned ? "📌" : "📍"}
+                          </button>
+                          <button onClick={() => deletarNota(n.id)} className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-sangue)]" title="Deletar">×</button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-sm text-[var(--color-pergaminho)] whitespace-pre-wrap">{n.body}</p>
+                </div>
+              ))}
+              <div className="space-y-2 pt-3 border-t border-[var(--color-pergaminho-velho)]/20">
+                <div className="flex gap-1">
+                  {(["self", "party", ...(isAdmin ? ["dm"] : [])] as const).map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setNovoEscopo(s as "self" | "party" | "dm")}
+                      className={`px-2 py-1 rounded text-[10px] uppercase border ${
+                        novoEscopo === s ? "border-[var(--color-dourado)] text-[var(--color-dourado)]" : "border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho-velho)]"
+                      }`}
+                    >
+                      {s === "self" ? "Pessoal" : s === "party" ? "Party" : "Mestre"}
+                    </button>
+                  ))}
+                </div>
+                <textarea
+                  value={novaNota}
+                  onChange={(e) => setNovaNota(e.target.value.slice(0, 5000))}
+                  placeholder="Escreva uma nota…"
+                  rows={3}
+                  maxLength={5000}
+                  className="w-full px-3 py-2 rounded bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/40 text-sm text-[var(--color-pergaminho)] resize-none"
+                />
+                <button onClick={adicionarNota} disabled={!novaNota.trim()} className="w-full px-3 py-2 rounded bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest disabled:opacity-40">
+                  Salvar nota
+                </button>
+              </div>
+            </>
+          )}
+
+          {aba === "npcs" && (
+            <>
+              {npcs.length === 0 && <p className="text-[var(--color-pergaminho-velho)] italic text-sm text-center py-6">Nenhum NPC conhecido ainda. Quando o Mestre apresentar alguém, aparece aqui.</p>}
+              {npcs.map((npc) => (
+                <div key={npc.id} className="p-3 rounded border border-[var(--color-pergaminho-velho)]/20 hover:border-[var(--color-dourado)]/40 transition">
+                  <div className="flex items-baseline justify-between mb-1">
+                    <h4 className="text-sm text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">{npc.name}</h4>
+                    {npc.faction && <span className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)]">{npc.faction}</span>}
+                  </div>
+                  {npc.appearance && <p className="text-xs text-[var(--color-pergaminho)] italic mb-1">{npc.appearance}</p>}
+                  {npc.bordao && <p className="text-xs text-[var(--color-pergaminho-velho)]">&ldquo;{npc.bordao}&rdquo;</p>}
+                  {npc.relation !== 0 && (
+                    <div className="mt-2 h-1 bg-[var(--color-carvao)] rounded-full overflow-hidden">
+                      <div
+                        className={`h-full ${npc.relation > 0 ? "bg-emerald-500" : "bg-[var(--color-sangue)]"}`}
+                        style={{ width: `${Math.min(100, Math.abs(npc.relation))}%`, marginLeft: npc.relation < 0 ? `${100 - Math.min(100, Math.abs(npc.relation))}%` : "0" }}
+                      />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

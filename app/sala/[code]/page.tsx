@@ -66,6 +66,12 @@ type Character = {
   spells: { nome: string; nivel: number; efeito: string }[];
   features: string[];
   inventory: InventoryItem[];
+  // Mecânicas avançadas — opcionais (default em runtime se ausente)
+  spell_slots?: Record<string, { max: number; used: number }>;
+  death_saves?: { successes: number; failures: number; stable: boolean };
+  conditions?: { name: string; source?: string; expires_at?: string }[];
+  xp?: number;
+  inspiration?: boolean;
 };
 
 type Campaign = {
@@ -190,6 +196,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [iniciativa, setIniciativa] = useState<IniciativaItem[]>([]);
   // Anti-flicker / cleanup do timeout do mestre
   const mestreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Channel pra broadcast "Mestre invocando" entre clients (não-DB, mais rápido)
+  // Tipo escapa do supabase (RealtimeChannel) — mantemos como ref opaco
+  const dmChannelRef = useRef<{ send: (args: { type: string; event: string; payload?: Record<string, unknown> }) => unknown } | null>(null);
   // Acalma TS sobre uso de iniciativa quando combate ainda não tem UI completa
   void iniciativa;
 
@@ -451,6 +460,30 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             }
           ).subscribe();
           unsubs.push(() => sb.removeChannel(ch2));
+
+          // Channel separado pra broadcast "Mestre invocando" (sem ir ao DB)
+          const ch3 = sb.channel(`dm-thinking-${sId}`, { config: { broadcast: { self: false } } })
+            .on("broadcast", { event: "thinking-start" }, () => {
+              // Outro player chamou DM — mostra loader pra mim também
+              setMestreEscrevendo(true);
+              if (mestreTimeoutRef.current) clearTimeout(mestreTimeoutRef.current);
+              mestreTimeoutRef.current = setTimeout(() => {
+                setMestreEscrevendo(false);
+                mestreTimeoutRef.current = null;
+              }, 60000); // safety: limpa em 60s caso DM nunca responda
+            })
+            .on("broadcast", { event: "thinking-stop" }, () => {
+              // O loader vai parar naturalmente quando DM narration chegar (com play_at).
+              // Aqui só liberamos pro caso de erro.
+              if (mestreTimeoutRef.current) clearTimeout(mestreTimeoutRef.current);
+              mestreTimeoutRef.current = setTimeout(() => {
+                setMestreEscrevendo(false);
+                mestreTimeoutRef.current = null;
+              }, 1500);
+            })
+            .subscribe();
+          dmChannelRef.current = ch3 as unknown as typeof dmChannelRef.current;
+          unsubs.push(() => { sb.removeChannel(ch3); dmChannelRef.current = null; });
         }
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Erro";
@@ -625,6 +658,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     if (!campaign || !sessionId || aguardandoIA) return;
     setAguardandoIA(true);
 
+    // Broadcast: outros clientes mostram loader também (não só quem mandou)
+    try {
+      dmChannelRef.current?.send({ type: "broadcast", event: "thinking-start" });
+    } catch {}
+
     if (!isOpening) {
       await logEvent({
         actor_type: "player",
@@ -726,6 +764,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         event_type: "error",
         payload: { text: `Mestre se calou: ${msg}` },
       });
+      try {
+        dmChannelRef.current?.send({ type: "broadcast", event: "thinking-stop" });
+      } catch {}
     } finally {
       setAguardandoIA(false);
     }
@@ -1303,24 +1344,38 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
   const raca = RACAS.find((r) => r.key === char.race);
   const classe = CLASSES.find((c) => c.key === char.class);
   const portraitSize = compact ? "w-20 h-20" : "w-32 h-32";
+  const isCaster = ["mago", "clerigo", "bardo"].includes(char.class);
+  const isDying = char.hp_current === 0;
+  const ds = char.death_saves || { successes: 0, failures: 0, stable: false };
   return (
     <div className="space-y-4">
       <div className="flex items-start gap-3">
         {char.portrait_url && (
           /* eslint-disable-next-line @next/next/no-img-element */
-          <img src={char.portrait_url} alt={char.name} className={`${portraitSize} object-cover rounded-lg border border-[var(--color-dourado)]/40 flex-shrink-0`} />
+          <img src={char.portrait_url} alt={char.name} className={`${portraitSize} object-cover rounded-lg border ${isDying ? "border-[var(--color-sangue)]/70 grayscale" : "border-[var(--color-dourado)]/40"} flex-shrink-0`} />
         )}
         <div className="flex-1 min-w-0">
-          <h3 className="text-lg text-[var(--color-dourado-claro)] dourado-glow font-[family-name:var(--font-cinzel)] leading-tight">{char.name}</h3>
+          <h3 className={`text-lg dourado-glow font-[family-name:var(--font-cinzel)] leading-tight ${isDying ? "text-[var(--color-sangue)]" : "text-[var(--color-dourado-claro)]"}`}>{char.name}</h3>
           <p className="text-xs text-[var(--color-pergaminho-velho)] uppercase tracking-widest mt-1">
             {raca?.nome} · {classe?.nome}
           </p>
-          <p className="text-xs text-[var(--color-pergaminho-velho)]">Nível {char.level}</p>
+          <p className="text-xs text-[var(--color-pergaminho-velho)]">Nível {char.level}{char.inspiration && <span className="ml-2 text-[var(--color-dourado)]">✨ Inspiração</span>}</p>
         </div>
       </div>
 
+      {/* Condições ativas */}
+      {char.conditions && char.conditions.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {char.conditions.map((c, i) => (
+            <span key={i} className="text-[10px] uppercase tracking-widest bg-[var(--color-vinho)]/40 border border-[var(--color-sangue)]/50 text-[var(--color-pergaminho)] px-2 py-0.5 rounded">
+              {c.name}
+            </span>
+          ))}
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-2 text-center">
-        <div className="bg-[var(--color-carvao)]/60 border border-[var(--color-pergaminho-velho)]/30 rounded p-2">
+        <div className={`bg-[var(--color-carvao)]/60 border rounded p-2 ${isDying ? "border-[var(--color-sangue)] animate-pulse" : "border-[var(--color-pergaminho-velho)]/30"}`}>
           <div className="text-xs text-[var(--color-pergaminho-velho)] uppercase">HP</div>
           <div className="text-lg text-[var(--color-sangue)] font-[family-name:var(--font-cinzel-decorative)]">{char.hp_current}/{char.hp_max}</div>
         </div>
@@ -1329,6 +1384,21 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           <div className="text-lg text-[var(--color-dourado)] font-[family-name:var(--font-cinzel-decorative)]">{char.ac}</div>
         </div>
       </div>
+
+      {/* Death saves quando HP=0 */}
+      {isDying && !ds.stable && (
+        <DeathSavesUI charId={char.id} ds={ds} />
+      )}
+      {isDying && ds.stable && (
+        <div className="text-center text-xs text-[var(--color-pergaminho-velho)] italic border border-[var(--color-pergaminho-velho)]/30 rounded p-2">
+          Estável. Aguardando cura.
+        </div>
+      )}
+
+      {/* Spell slots se caster */}
+      {!compact && isCaster && (
+        <SpellSlots char={char} />
+      )}
 
       <div className="grid grid-cols-3 gap-1 text-center text-xs">
         {(["for", "des", "con", "int", "sab", "car"] as const).map((k) => {
@@ -1399,6 +1469,154 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
       )}
     </div>
   );
+}
+
+/**
+ * Death Saves: 3 sucessos = estável, 3 falhas = morte.
+ * 1 natural = 2 falhas, 20 natural = recupera 1 HP.
+ */
+function DeathSavesUI({ charId, ds }: { charId: string; ds: { successes: number; failures: number; stable: boolean } }) {
+  const [rolling, setRolling] = useState(false);
+
+  async function rolarSaveDeMorte() {
+    if (rolling) return;
+    setRolling(true);
+    const sb = getSupabase();
+    const r = 1 + Math.floor(Math.random() * 20);
+    sfxPlay("dice");
+
+    let novoSuccesses = ds.successes;
+    let novoFailures = ds.failures;
+    let novoStable = ds.stable;
+    let curaImediata = 0;
+
+    if (r === 20) {
+      // 20 natural: recupera 1 HP
+      curaImediata = 1;
+      novoSuccesses = 0;
+      novoFailures = 0;
+      sfxPlay("heal");
+    } else if (r === 1) {
+      novoFailures = Math.min(3, novoFailures + 2);
+      sfxPlay("fumble");
+    } else if (r >= 10) {
+      novoSuccesses = Math.min(3, novoSuccesses + 1);
+      if (novoSuccesses >= 3) novoStable = true;
+    } else {
+      novoFailures = Math.min(3, novoFailures + 1);
+    }
+
+    const update: Record<string, unknown> = {
+      death_saves: { successes: novoSuccesses, failures: novoFailures, stable: novoStable },
+    };
+    if (curaImediata > 0) {
+      update.hp_current = curaImediata;
+      update.death_saves = { successes: 0, failures: 0, stable: false };
+    } else if (novoFailures >= 3) {
+      sfxPlay("death");
+    }
+
+    await sb.from("characters").update(update).eq("id", charId);
+    setRolling(false);
+  }
+
+  return (
+    <div className="border border-[var(--color-sangue)]/50 rounded p-3 bg-[var(--color-sangue)]/10">
+      <p className="text-xs uppercase tracking-widest text-[var(--color-sangue)] mb-2 text-center">⚰ Save de morte</p>
+      <div className="grid grid-cols-2 gap-2 mb-2 text-center text-xs">
+        <div>
+          <span className="text-[var(--color-pergaminho-velho)] block">Sucessos</span>
+          <span className="text-emerald-400 text-lg">{"●".repeat(ds.successes)}{"○".repeat(3 - ds.successes)}</span>
+        </div>
+        <div>
+          <span className="text-[var(--color-pergaminho-velho)] block">Falhas</span>
+          <span className="text-[var(--color-sangue)] text-lg">{"●".repeat(ds.failures)}{"○".repeat(3 - ds.failures)}</span>
+        </div>
+      </div>
+      {ds.failures < 3 ? (
+        <button
+          onClick={rolarSaveDeMorte}
+          disabled={rolling}
+          className="w-full px-3 py-2 rounded bg-[var(--color-sangue)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest hover:bg-[var(--color-sangue)]/80 disabled:opacity-50"
+        >
+          {rolling ? "Rolando…" : "Rolar 1d20 (≥10 = sucesso)"}
+        </button>
+      ) : (
+        <p className="text-center text-[var(--color-sangue)] uppercase tracking-widest text-xs">Morto. Que descanse em paz.</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Spell Slots tracker — mago/clérigo/bardo.
+ * Defaults por nível baseados em D&D 5e.
+ */
+function SpellSlots({ char }: { char: Character }) {
+  const slots = char.spell_slots || defaultSpellSlots(char.class, char.level);
+
+  async function toggleSlot(level: string, idx: number) {
+    const sb = getSupabase();
+    const cur = slots[level] || { max: 0, used: 0 };
+    const novoUsed = idx < cur.used ? cur.used - 1 : cur.used + 1;
+    const updated = { ...slots, [level]: { ...cur, used: Math.min(cur.max, Math.max(0, novoUsed)) } };
+    sfxPlay("magic");
+    await sb.from("characters").update({ spell_slots: updated }).eq("id", char.id);
+  }
+
+  const niveis = Object.keys(slots).filter((l) => slots[l]?.max > 0).sort();
+  if (niveis.length === 0) return null;
+
+  return (
+    <div>
+      <h4 className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-2">Slots de magia</h4>
+      <div className="space-y-1.5">
+        {niveis.map((l) => {
+          const s = slots[l];
+          return (
+            <div key={l} className="flex items-center gap-2">
+              <span className="text-[10px] uppercase text-[var(--color-pergaminho-velho)] w-6 flex-shrink-0">N{l}</span>
+              <div className="flex gap-1 flex-wrap">
+                {Array.from({ length: s.max }).map((_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => toggleSlot(l, i)}
+                    className={`w-4 h-4 rounded-full border transition ${
+                      i < s.used
+                        ? "bg-[var(--color-pergaminho-velho)]/30 border-[var(--color-pergaminho-velho)]/60"
+                        : "bg-[var(--color-dourado)]/40 border-[var(--color-dourado)]"
+                    }`}
+                    title={i < s.used ? "Slot gasto" : "Slot disponível"}
+                  />
+                ))}
+              </div>
+              <span className="text-[10px] text-[var(--color-pergaminho-velho)] ml-auto">{s.max - s.used}/{s.max}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/** Slots padrão por classe e nível (D&D 5e simplified). */
+function defaultSpellSlots(classe: string, level: number): Record<string, { max: number; used: number }> {
+  const isCaster = ["mago", "clerigo", "bardo"].includes(classe);
+  if (!isCaster) return {};
+  // Tabela simplificada — full caster
+  const tbl: number[][] = [
+    /* lvl 1  */ [2],
+    /* lvl 2  */ [3],
+    /* lvl 3  */ [4, 2],
+    /* lvl 4  */ [4, 3],
+    /* lvl 5  */ [4, 3, 2],
+  ];
+  const row = tbl[Math.min(level, tbl.length) - 1] || [2];
+  const out: Record<string, { max: number; used: number }> = {};
+  row.forEach((max, idx) => {
+    out[String(idx + 1)] = { max, used: 0 };
+  });
+  return out;
 }
 
 /**

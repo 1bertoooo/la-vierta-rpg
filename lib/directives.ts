@@ -202,11 +202,12 @@ function normalizeAttr(a: string): string {
 }
 
 /**
- * Remove diretivas do texto pra exibição limpa (mas mantém [COMBATE INICIA] já tratado pelo regex original).
+ * Remove diretivas do texto pra exibição limpa.
+ * Usa regex local (não compartilhado com TAG_RE global) pra evitar bugs de lastIndex.
  */
 export function stripDirectives(text: string): string {
   return text
-    .replace(TAG_RE, "")
+    .replace(/\[([A-Z_]+)(?:\s*:\s*|\s+)?([^\]]*)\]/gi, "")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }

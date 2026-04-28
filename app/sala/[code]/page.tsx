@@ -223,6 +223,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   // Channel pra broadcast "Mestre invocando" entre clients (não-DB, mais rápido)
   // Tipo escapa do supabase (RealtimeChannel) — mantemos como ref opaco
   const dmChannelRef = useRef<{ send: (args: { type: string; event: string; payload?: Record<string, unknown> }) => unknown } | null>(null);
+  // Set de event IDs já enviados pra TTS — evita duplicação em reconexão de realtime
+  const ttsSentIdsRef = useRef<Set<string>>(new Set());
 
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -275,7 +277,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      if (showDados) setShowDados(false);
+      if (asideRecebido) setAsideRecebido(null);
+      else if (npcRecemConhecido) setNpcRecemConhecido(null);
+      else if (showDados) setShowDados(false);
       else if (showPergaminhos) setShowPergaminhos(false);
       else if (fichaVendo) setFichaVendo(null);
       else if (showAudioPanel) setShowAudioPanel(false);
@@ -283,7 +287,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [showDados, showPergaminhos, fichaVendo, showAudioPanel, showResetModal]);
+  }, [showDados, showPergaminhos, fichaVendo, showAudioPanel, showResetModal, asideRecebido, npcRecemConhecido]);
 
   // "Tua vez" — toca som + vibration + toast quando turno fica meu
   const turnoAnteriorRef = useRef<string | null>(null);
@@ -484,8 +488,16 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 const targetAt = playAt ?? created + 4000;
                 const delay = Math.max(0, targetAt - Date.now());
 
-                // TTS sincronizado
-                if (ttsIsEnabled()) ttsSpeak(txt, { playAt: targetAt });
+                // TTS sincronizado — dedup por event id (evita 2x em reconexão)
+                if (ttsIsEnabled() && !ttsSentIdsRef.current.has(ev.id)) {
+                  ttsSentIdsRef.current.add(ev.id);
+                  // Limita o set pra não crescer infinito
+                  if (ttsSentIdsRef.current.size > 200) {
+                    const arr = Array.from(ttsSentIdsRef.current);
+                    ttsSentIdsRef.current = new Set(arr.slice(-100));
+                  }
+                  ttsSpeak(txt, { playAt: targetAt });
+                }
 
                 // Música pelo diretivo OU auto-detect (ambos ou nenhum funciona)
                 audioPlayFromNarration({ explicit_mood: musicDir?.mood ?? null, text: txt });
@@ -496,8 +508,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 if (delay > 200) {
                   setMestreEscrevendo(true);
                   setAguardandoIA(false);
-                  if (mestreTimeoutRef.current) clearTimeout(mestreTimeoutRef.current);
-                  mestreTimeoutRef.current = setTimeout(() => {
+                  // NÃO cancela timeout anterior — cada narração tem seu próprio agendamento
+                  // (impedia bug onde 2 narrações próximas perdiam a primeira)
+                  setTimeout(() => {
                     addLog(ev);
                     setMestreEscrevendo(false);
                     if (rollDir) setPendingRoll({
@@ -506,7 +519,6 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                     });
                     if (rollDir?.vantage === "advantage") setVantageMode("advantage");
                     else if (rollDir?.vantage === "disadvantage") setVantageMode("disadvantage");
-                    mestreTimeoutRef.current = null;
                   }, delay);
                 } else {
                   addLog(ev);
@@ -637,7 +649,15 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               .select("user_id, display_name")
               .eq("campaign_id", campaign.id);
             const alvo = (ps || []).find((p) => ((p as { display_name?: string }).display_name || "").toLowerCase() === targetLower) as { user_id?: string } | undefined;
-            if (!alvo?.user_id) return;
+            if (!alvo?.user_id) {
+              // Loga falha visível em vez de silenciar (P0 — dano sumindo)
+              await logEvent({
+                actor_type: "system",
+                event_type: "info",
+                payload: { text: `⚠ HP ${d.delta >= 0 ? "+" : ""}${d.delta} pra "${d.target}" — alvo não encontrado.` },
+              });
+              return;
+            }
             const { data: ch } = await sb.from("characters")
               .select("id, hp_current, hp_max")
               .eq("campaign_id", campaign.id)
@@ -788,7 +808,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         }
         case "aside": {
           // Aside privado — só o player alvo recebe (lateral, em modal)
-          if (!me?.nick || d.target.toLowerCase() !== me.nick.toLowerCase()) break;
+          const myNick = me?.nick;
+          if (!myNick) break;
+          if (d.target.toLowerCase() !== myNick.toLowerCase()) break;
           setTimeout(() => {
             setAsideRecebido(d.text);
             sfxPlay("bell");
@@ -796,7 +818,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           break;
         }
         case "timeskip": {
-          // Avança clocks +1 cada e marca passagem temporal
+          // Avança doom + arco; situacional RESETA (cena nova após pulo temporal)
           if (!sessionId) break;
           setTimeout(async () => {
             const { data: sess } = await sb.from("sessions")
@@ -806,7 +828,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             const clocks = (sess as { doom_clocks?: Record<string, { max: number; current: number; label?: string }> } | null)?.doom_clocks || doomClocks;
             const updated: typeof clocks = {};
             for (const [k, v] of Object.entries(clocks)) {
-              updated[k] = { ...v, current: Math.min(v.max, v.current + 1) };
+              if (k === "situacional") {
+                updated[k] = { ...v, current: 0 }; // cena nova, pressão imediata reseta
+              } else {
+                updated[k] = { ...v, current: Math.min(v.max, v.current + 1) };
+              }
             }
             await sb.from("sessions").update({ doom_clocks: updated }).eq("id", sessionId);
             sfxPlay("page");

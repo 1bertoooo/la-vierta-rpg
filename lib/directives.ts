@@ -41,7 +41,8 @@ export type Directive =
   | { kind: "xp"; target: string; amount: number }
   | { kind: "clock"; name: string; op: "set" | "delta"; value: number }
   | { kind: "aside"; target: string; text: string }
-  | { kind: "timeskip"; amount: string };
+  | { kind: "timeskip"; amount: string }
+  | { kind: "panel"; description: string; caption: string };
 
 const TAG_RE = /\[([A-Z_]+)(?:\s*:\s*|\s+)?([^\]]*)\]/gi;
 
@@ -187,6 +188,18 @@ function parseTag(tag: string, rest: string): Directive | null {
       return rest ? { kind: "timeskip", amount: rest } : null;
     }
 
+    case "PANEL": {
+      // "descrição visual da cena | frase de impacto"
+      // Gera ilustração via Pollinations + caption dramática.
+      const partes = rest.split(/\s*\|\s*/);
+      if (partes.length < 2) return null;
+      return {
+        kind: "panel",
+        description: partes[0].trim(),
+        caption: partes[1].trim(),
+      };
+    }
+
     default:
       return null;
   }
@@ -202,21 +215,22 @@ function normalizeAttr(a: string): string {
 }
 
 /**
- * Remove diretivas do texto pra exibição limpa.
- * Usa regex local (não compartilhado com TAG_RE global) pra evitar bugs de lastIndex.
- * Limpa também separadores órfãos que ficam após remoção (", , :", " : ", etc).
+ * Remove diretivas do texto pra exibição limpa. Conservadora: NÃO toca em
+ * em-dashes (—), aspas, hífens, pra preservar diálogo Suassuna-style.
+ * Limpa só lixo óbvio que aparece DEPOIS da remoção das tags.
  */
 export function stripDirectives(text: string): string {
   return text
     // Remove [TAG] e [TAG: ...]
     .replace(/\[([A-Z_]+)(?:\s*:\s*|\s+)?([^\]]*)\]/gi, "")
-    // Limpa separadores órfãos que ficam: vírgula sem nada, dois-pontos no início, etc
-    .replace(/^[\s,;:.!?\-—–]+/gm, "") // separadores no INÍCIO da linha
-    .replace(/[\s,;]+([:.])/g, "$1") // ", :" → ":" / "; ." → "."
-    .replace(/[ \t]+([,;:.!?])/g, "$1") // espaço antes de pontuação
-    .replace(/([,;:])\s*([,;:])/g, "$1") // pontuação dupla "," ou ", ," → ","
-    .replace(/^[\s,;:]+/g, "") // limpa início do texto
-    .replace(/[ \t]{2,}/g, " ") // múltiplos espaços
+    // Múltiplos espaços viram um
+    .replace(/[ \t]{2,}/g, " ")
+    // Quebras de linha excessivas
     .replace(/\n{3,}/g, "\n\n")
+    // Limpa SÓ leading whitespace + vírgulas/dois-pontos órfãos no início absoluto
+    // (NÃO toca em — ou outros caracteres válidos)
+    .replace(/^[\s,;:]+/, "")
+    // Remove espaço antes de vírgula/ponto (cosmético)
+    .replace(/ +([,.])/g, "$1")
     .trim();
 }

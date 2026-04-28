@@ -30,52 +30,32 @@ function CadastroInner() {
 
     setLoading(true);
     try {
-      const sb = getSupabase();
-
-      // Verifica se nick já existe
-      const { data: existing } = await sb.rpc("email_by_nick", {
-        p_nick: nickLimpo,
+      // Cadastro via endpoint server-side (bypassa rate limit do Supabase signup público)
+      const r = await fetch("/api/cadastrar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ nick: nickLimpo, password: senha }),
       });
-      if (existing) {
-        setErro("Esse nick já tá em uso. Escolhe outro.");
+      const data = await r.json();
+      if (!r.ok) {
+        setErro(data.error || "Erro ao criar conta");
         setLoading(false);
         return;
       }
 
-      // Email sintético baseado no nick
-      const emailSintetico = `${nickLimpo}@lavierta.app`;
-
-      const { data, error } = await sb.auth.signUp({
-        email: emailSintetico,
-        password: senha,
-        options: {
-          data: { nick: nickLimpo },
-          emailRedirectTo:
-            typeof window !== "undefined"
-              ? `${window.location.origin}/sala/velreth-elite`
-              : undefined,
-        },
-      });
-      if (error) throw error;
-
-      if (data.session) {
-        router.push(next);
-        router.refresh();
-        return;
-      }
-
-      // Email confirmation pode estar habilitada — mas como o email é sintético, não vai chegar.
-      // Tenta logar direto:
+      // Conta criada — agora loga
+      const sb = getSupabase();
       const { error: loginErr } = await sb.auth.signInWithPassword({
-        email: emailSintetico,
+        email: `${nickLimpo}@lavierta.app`,
         password: senha,
       });
-      if (!loginErr) {
-        router.push(next);
-        router.refresh();
+      if (loginErr) {
+        setErro("Conta criada, mas erro ao logar: " + loginErr.message);
+        setLoading(false);
         return;
       }
-      setEmailEnviado(true);
+      router.push(next);
+      router.refresh();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Erro ao criar conta";
       setErro(traduzirErro(msg));
@@ -138,7 +118,7 @@ function CadastroInner() {
               minLength={2}
               maxLength={30}
               autoComplete="username"
-              placeholder="ex: yumi, luiz, nelson"
+              placeholder="teu nick"
               value={nick}
               onChange={(e) => setNick(e.target.value)}
               disabled={loading}

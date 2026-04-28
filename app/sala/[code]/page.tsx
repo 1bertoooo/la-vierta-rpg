@@ -217,6 +217,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   });
   // Aside privado pra mim (info que personagem viu, outros não)
   const [asideRecebido, setAsideRecebido] = useState<string | null>(null);
+  // Comic panel (eventos importantes — morte, level up, descoberta)
+  const [panelAtivo, setPanelAtivo] = useState<{ description: string; caption: string; imageUrl: string } | null>(null);
   // Sumário rolante de campanha (anti voice drift do LLM)
   const [campaignSummary, setCampaignSummary] = useState<string>("");
   const [summaryEventCount, setSummaryEventCount] = useState<number>(0);
@@ -848,6 +850,29 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           }, Math.max(0, delayMs));
           break;
         }
+        case "panel": {
+          // Comic panel: gera imagem via Pollinations + mostra modal full-screen dramático
+          setTimeout(async () => {
+            try {
+              const epicPrompt = `epic dark fantasy painting, ${d.description}, dramatic lighting, oil painting, dungeons and dragons concept art, Larry Elmore Wayne Reynolds style, atmospheric, deep saturated colors`;
+              // Traduz pra inglês se necessário
+              const tr = await fetch("/api/translate-look", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ text: d.description }),
+              }).then((r) => r.json()).catch(() => ({ translated: d.description }));
+              const promptEn = `${tr.translated || d.description}, ${epicPrompt}`;
+              const seed = Math.floor(Math.random() * 1000000);
+              const imageUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(promptEn)}?width=1024&height=576&seed=${seed}&model=flux&nologo=true`;
+              setPanelAtivo({ description: d.description, caption: d.caption, imageUrl });
+              sfxPlay("page");
+            } catch {
+              // Mesmo sem imagem, mostra panel só com caption
+              setPanelAtivo({ description: d.description, caption: d.caption, imageUrl: "" });
+            }
+          }, Math.max(0, delayMs));
+          break;
+        }
         case "timeskip": {
           // Avança doom + arco; situacional RESETA (cena nova após pulo temporal)
           if (!sessionId) break;
@@ -912,11 +937,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     }
   }
 
-  async function chamarDM(prompt: string, isOpening = false) {
+  async function chamarDM(prompt: string, opts: { isOpening?: boolean; silent?: boolean } = {}) {
     if (!campaign || !sessionId || aguardandoIA) return;
+    const { isOpening = false, silent = false } = opts;
 
     // Lock atômico: previne 2 jogadores chamarem DM simultaneamente.
-    // Se RPC ainda não migrou, ignora e segue (degradação graciosa).
     const sb = getSupabase();
     try {
       const { data: locked } = await sb.rpc("try_lock_dm", { p_session_id: sessionId });
@@ -928,16 +953,17 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         });
         return;
       }
-    } catch {} // RPC não existe ainda — fallback OK
+    } catch {}
 
     setAguardandoIA(true);
 
-    // Broadcast: outros clientes mostram loader também (não só quem mandou)
     try {
       dmChannelRef.current?.send({ type: "broadcast", event: "thinking-start" });
     } catch {}
 
-    if (!isOpening) {
+    // silent=true: prompt vai direto pro Mestre sem logar como fala do player
+    // (usado quando rolagem auto-aciona "narre o resultado")
+    if (!isOpening && !silent) {
       await logEvent({
         actor_type: "player",
         event_type: "speak",
@@ -1139,7 +1165,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     // Se era pendente (Mestre pediu), automaticamente chama o DM pra narrar resultado
     if (wasPending && !aguardandoIA) {
       const prompt = `[rolagem do mestre que ele pediu] ${rollText}. Narre o resultado, considerando se foi sucesso, falha, crítico ou fumble. Continue a cena.`;
-      await chamarDM(prompt);
+      // silent: NÃO loga esse prompt como fala do player (é trigger interno pro Mestre)
+      await chamarDM(prompt, { silent: true });
     }
   }
 
@@ -1204,7 +1231,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     audioPlayMood("tavern");
     setMusicaTocando(true);
 
-    await chamarDM(DM_OPENING_PROMPT, true);
+    await chamarDM(DM_OPENING_PROMPT, { isOpening: true });
     if (players.length > 0) {
       const sb = getSupabase();
       const primeiro = players.find((p) => p.user_id);
@@ -1695,6 +1722,11 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       {/* Aside privado: info que só meu personagem viu */}
       {asideRecebido && (
         <AsidePrivadoModal text={asideRecebido} onClose={() => setAsideRecebido(null)} />
+      )}
+
+      {/* Comic panel: eventos importantes (morte, level up, descoberta) */}
+      {panelAtivo && (
+        <ComicPanelModal panel={panelAtivo} onClose={() => setPanelAtivo(null)} />
       )}
 
       {/* Modal Pergaminhos: notas + quests + NPCs */}
@@ -2344,6 +2376,92 @@ function AsidePrivadoModal({ text, onClose }: { text: string; onClose: () => voi
         @keyframes asideEntra {
           from { opacity: 0; transform: scale(0.9) translateY(10px); }
           to   { opacity: 1; transform: scale(1) translateY(0); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+/**
+ * ComicPanelModal — Painel ilustrado épico pra eventos importantes
+ * (morte, level up, descoberta, NPC importante revelado).
+ * Mestre invoca via [PANEL: descrição visual | frase de impacto].
+ * Pollinations gera ilustração; modal full-screen com fade.
+ */
+function ComicPanelModal({
+  panel,
+  onClose,
+}: {
+  panel: { description: string; caption: string; imageUrl: string };
+  onClose: () => void;
+}) {
+  const [loaded, setLoaded] = useState(false);
+  // Auto-fecha em 12s se ninguém clicar
+  useEffect(() => {
+    const t = setTimeout(onClose, 12000);
+    return () => clearTimeout(t);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/95 backdrop-blur-md px-4 animate-[panelEntra_0.6s_ease-out]"
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="relative max-w-4xl w-full"
+        style={{ animation: "panelInside 0.9s cubic-bezier(0.2, 0.8, 0.2, 1)" }}
+      >
+        {/* Imagem ilustrada */}
+        {panel.imageUrl && (
+          <div className="relative w-full aspect-[16/9] bg-[var(--color-carvao)] border-2 border-[var(--color-dourado)] rounded-lg overflow-hidden shadow-2xl"
+            style={{ boxShadow: "0 0 80px rgba(212, 175, 55, 0.4), 0 0 160px rgba(110, 26, 26, 0.5)" }}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={panel.imageUrl}
+              alt={panel.description}
+              onLoad={() => setLoaded(true)}
+              className={`w-full h-full object-cover transition-opacity duration-700 ${loaded ? "opacity-100" : "opacity-0"}`}
+            />
+            {!loaded && (
+              <div className="absolute inset-0 flex items-center justify-center text-[var(--color-pergaminho-velho)] italic">
+                Tinta correndo no pergaminho…
+              </div>
+            )}
+            {/* Vinheta nas bordas pra dar peso comic-book */}
+            <div className="absolute inset-0 pointer-events-none" style={{
+              background: "radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%)"
+            }} />
+          </div>
+        )}
+
+        {/* Caption — frase de impacto */}
+        <div className="mt-4 text-center px-6">
+          <p
+            className="text-2xl md:text-3xl text-[var(--color-dourado-claro)] dourado-glow font-[family-name:var(--font-cinzel-decorative)] leading-tight tracking-wide"
+            style={{ textShadow: "0 0 20px rgba(212, 175, 55, 0.6), 0 2px 8px rgba(0,0,0,0.9)" }}
+          >
+            {panel.caption}
+          </p>
+        </div>
+
+        <button
+          onClick={onClose}
+          className="absolute top-3 right-3 text-[var(--color-pergaminho)]/70 hover:text-[var(--color-dourado)] text-2xl leading-none bg-black/50 rounded-full w-8 h-8 flex items-center justify-center"
+          aria-label="Fechar"
+        >
+          ×
+        </button>
+      </div>
+      <style jsx>{`
+        @keyframes panelEntra {
+          from { opacity: 0; }
+          to { opacity: 1; }
+        }
+        @keyframes panelInside {
+          0%   { opacity: 0; transform: scale(0.85) translateY(20px); }
+          50%  { opacity: 1; transform: scale(1.02) translateY(-2px); }
+          100% { transform: scale(1) translateY(0); }
         }
       `}</style>
     </div>

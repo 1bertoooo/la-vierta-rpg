@@ -204,10 +204,19 @@ function normalizeAttr(a: string): string {
 /**
  * Remove diretivas do texto pra exibição limpa.
  * Usa regex local (não compartilhado com TAG_RE global) pra evitar bugs de lastIndex.
+ * Limpa também separadores órfãos que ficam após remoção (", , :", " : ", etc).
  */
 export function stripDirectives(text: string): string {
   return text
+    // Remove [TAG] e [TAG: ...]
     .replace(/\[([A-Z_]+)(?:\s*:\s*|\s+)?([^\]]*)\]/gi, "")
+    // Limpa separadores órfãos que ficam: vírgula sem nada, dois-pontos no início, etc
+    .replace(/^[\s,;:.!?\-—–]+/gm, "") // separadores no INÍCIO da linha
+    .replace(/[\s,;]+([:.])/g, "$1") // ", :" → ":" / "; ." → "."
+    .replace(/[ \t]+([,;:.!?])/g, "$1") // espaço antes de pontuação
+    .replace(/([,;:])\s*([,;:])/g, "$1") // pontuação dupla "," ou ", ," → ","
+    .replace(/^[\s,;:]+/g, "") // limpa início do texto
+    .replace(/[ \t]{2,}/g, " ") // múltiplos espaços
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }

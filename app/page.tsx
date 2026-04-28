@@ -2,23 +2,29 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { getSupabase } from "@/lib/supabase/client";
 import { getLastRoomCode } from "@/lib/player";
 
 const SALA_PADRAO = "velreth-elite";
 
 export default function Home() {
+  const [logged, setLogged] = useState<boolean | null>(null);
   const [lastRoom, setLastRoom] = useState<string | null>(null);
-  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
+    const sb = getSupabase();
+    sb.auth.getUser().then(({ data }) => setLogged(!!data.user));
     setLastRoom(getLastRoomCode());
+
+    const {
+      data: { subscription },
+    } = sb.auth.onAuthStateChange((_event, session) => {
+      setLogged(!!session?.user);
+    });
+    return () => subscription.unsubscribe();
   }, []);
 
-  // Se ele já jogou em alguma sala, "Continuar" volta pra ela.
-  // Se nunca jogou, "Iniciar Aventura" abre a sala padrão da Élite.
-  const continuarHref = lastRoom ? `/sala/${lastRoom}` : `/sala/${SALA_PADRAO}`;
-  const novaHref = `/nova`;
+  const sala = lastRoom || SALA_PADRAO;
 
   return (
     <main className="relative flex-1 overflow-hidden flex flex-col items-center justify-center px-6 pergaminho-texture">
@@ -57,21 +63,26 @@ export default function Home() {
         </p>
 
         <div className="flex flex-col sm:flex-row gap-4 items-center justify-center">
-          <Link href={continuarHref}>
-            <button className="btn-selo">
-              {mounted && lastRoom ? "Retornar à Aventura" : "Iniciar Aventura"}
-            </button>
-          </Link>
-
-          {mounted && lastRoom && (
-            <Link href={novaHref}>
-              <button className="btn-selo-secundario">Iniciar Nova Aventura</button>
+          {logged === null ? (
+            <div className="h-[58px]" />
+          ) : logged ? (
+            <Link href={`/sala/${sala}`}>
+              <button className="btn-selo">Retornar à Aventura</button>
             </Link>
+          ) : (
+            <>
+              <Link href={`/login?next=${encodeURIComponent(`/sala/${sala}`)}`}>
+                <button className="btn-selo">Entrar</button>
+              </Link>
+              <Link href={`/cadastro?next=${encodeURIComponent(`/sala/${sala}`)}`}>
+                <button className="btn-selo-secundario">Forjar Conta</button>
+              </Link>
+            </>
           )}
         </div>
 
         <p className="mt-12 text-xs text-[var(--color-pedra)] tracking-widest">
-          Versão 0.2 · Alpha · Apenas para a Élite
+          Versão 0.3 · Alpha · Apenas para a Élite
         </p>
       </div>
 

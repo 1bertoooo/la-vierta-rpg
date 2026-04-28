@@ -156,7 +156,7 @@ type PendingRollServer = {
   expires_at?: number;
 };
 
-// Sprint N — Mapa tático
+// Sprint N/O — Mapa tático
 type MapToken = {
   id: string;
   type: "player" | "enemy" | "npc";
@@ -166,6 +166,7 @@ type MapToken = {
   portrait_url?: string;
   x: number;              // 0..(width-1)
   y: number;              // 0..(height-1)
+  size?: number;          // 1 (medium), 2 (large), 3 (huge) — Sprint O
   color?: string;         // override visual
   hp_current?: number;
   hp_max?: number;
@@ -231,6 +232,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [showHistorico, setShowHistorico] = useState(false); // Sprint J — round history modal
   const [showRecap, setShowRecap] = useState(false); // Sprint L — recap da campanha
   const [showZen, setShowZen] = useState(false); // Sprint M — modo zen full-screen
+  const [showOnboarding, setShowOnboarding] = useState(false); // Sprint O — primeiro acesso
+  const [showClocksHelp, setShowClocksHelp] = useState(false); // Sprint O — explica doom clocks
   const [notas, setNotas] = useState<NotaItem[]>([]);
   const [quests, setQuests] = useState<QuestItem[]>([]);
   const [npcsConhecidos, setNpcsConhecidos] = useState<NpcItem[]>([]);
@@ -409,6 +412,12 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     // Carrega volume salvo (real) e converte pra UI
     setAudioVol(realToUiVolume(audioGetVolume()));
     setSfxVol(sfxGetVolume());
+    // Sprint O — onboarding no primeiro acesso
+    try {
+      if (!localStorage.getItem("la-vierta-onboarded")) {
+        setShowOnboarding(true);
+      }
+    } catch {}
 
     // Tenta retomar audio em qualquer click do user (autoplay-bypass)
     const onAnyClick = () => audioResumeIfBlocked();
@@ -2046,8 +2055,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
         {/* Log */}
         <section className="flex-1 flex flex-col min-h-[60vh] max-h-[calc(100vh-120px)] lg:max-h-[calc(100vh-60px)]">
-          {/* Doom clocks — sempre visível (Vincent Baker) */}
-          <ClocksBar clocks={doomClocks} />
+          {/* Doom clocks — sempre visível (Vincent Baker). Click abre explicação. */}
+          <ClocksBar clocks={doomClocks} onHelpClick={() => setShowClocksHelp(true)} />
           {/* Tracker de iniciativa — só aparece em combate */}
           {emCombate && iniciativa.length > 0 && (
             <IniciativaTracker iniciativa={iniciativa} myUserId={me?.id} isAdmin={isAdmin} />
@@ -2072,12 +2081,18 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               }}
               onAddEnemy={isAdmin ? async (name: string) => {
                 if (!sessionId || !combatMap) return;
+                // Sprint O — detecta size pelo sufixo "large"/"huge" no nome
+                let size = 1;
+                let nomeLimpo = name;
+                if (/\bhuge\b/i.test(name)) { size = 3; nomeLimpo = name.replace(/\bhuge\b/i, "").trim(); }
+                else if (/\blarge\b/i.test(name)) { size = 2; nomeLimpo = name.replace(/\blarge\b/i, "").trim(); }
                 const novo: MapToken = {
                   id: `en-${Date.now().toString(36)}`,
                   type: "enemy",
-                  name,
-                  x: combatMap.width - 2,
-                  y: 1 + Math.floor(Math.random() * (combatMap.height - 2)),
+                  name: nomeLimpo || name,
+                  x: combatMap.width - size - 1,
+                  y: 1 + Math.floor(Math.random() * (combatMap.height - size - 1)),
+                  size,
                   color: "#a52a2a",
                 };
                 const novoMap = { ...combatMap, tokens: [...combatMap.tokens, novo] };
@@ -2385,6 +2400,21 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           log={log}
           onClose={() => setShowHistorico(false)}
         />
+      )}
+
+      {/* Sprint O — Onboarding modal (primeiro acesso) */}
+      {showOnboarding && (
+        <OnboardingModal
+          onClose={() => {
+            setShowOnboarding(false);
+            try { localStorage.setItem("la-vierta-onboarded", "1"); } catch {}
+          }}
+        />
+      )}
+
+      {/* Sprint O — Clocks help */}
+      {showClocksHelp && (
+        <ClocksHelpModal onClose={() => setShowClocksHelp(false)} />
       )}
 
       {/* Sprint L — Recap modal */}
@@ -3018,13 +3048,17 @@ function SpotlightBar({ players, log }: { players: Player[]; log: LogEvent[] }) 
  * ClocksBar — Doom clocks visíveis (Vincent Baker / John Harper).
  * Mostra 3 relógios com segmentos preenchidos. Ameaça implícita.
  */
-function ClocksBar({ clocks }: { clocks: Record<string, { max: number; current: number; label?: string; tipo?: string }> }) {
+function ClocksBar({ clocks, onHelpClick }: { clocks: Record<string, { max: number; current: number; label?: string; tipo?: string }>; onHelpClick?: () => void }) {
   // Doom em vermelho/vinho, Arco em vinho/dourado, Situacional dourado, Esperança verde-dourado, Sina sangue
   const order = ["esperanca", "sina", "doom", "arco", "situacional"];
   const visible = order.filter((k) => clocks[k] && clocks[k].max > 0);
   if (visible.length === 0) return null;
   return (
-    <div className="border-b border-[var(--color-pergaminho-velho)]/15 px-3 sm:px-4 py-1.5 bg-[var(--color-carvao)]/30 flex flex-wrap gap-3 sm:gap-5">
+    <div
+      className={`border-b border-[var(--color-pergaminho-velho)]/15 px-3 sm:px-4 py-1.5 bg-[var(--color-carvao)]/30 flex flex-wrap gap-3 sm:gap-5 ${onHelpClick ? "cursor-help hover:bg-[var(--color-carvao)]/50" : ""}`}
+      onClick={onHelpClick}
+      title={onHelpClick ? "Click pra entender os relógios" : undefined}
+    >
       {visible.map((k) => {
         const c = clocks[k];
         const pct = (c.current / c.max) * 100;
@@ -3152,6 +3186,116 @@ function HistoricoRodadasModal({
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Sprint O — OnboardingModal: explica o jogo no primeiro acesso.
+ */
+function OnboardingModal({ onClose }: { onClose: () => void }) {
+  const [step, setStep] = useState(0);
+  const passos = [
+    {
+      titulo: "Bem-vindo a La Vierta",
+      texto: "RPG narrativo com Mestre IA, voz brasileira e música ambiente. A Liga dos Quatro da Élite reune fragmentos da Caixa dos Sentimentos Não-Ditos.",
+      emoji: "⚜",
+    },
+    {
+      titulo: "Tua ação",
+      texto: "Aperta o microfone e fala, ou digita e aperta Enter. O Mestre só responde quando todos os jogadores ativos agirem na rodada.",
+      emoji: "🎙",
+    },
+    {
+      titulo: "Rolagens",
+      texto: "Quando o Mestre marca [ROLL: ATR DC X @teu_nick], o botão Rolar aparece SÓ pra ti. 20 natural = sucesso pleno + Esperança. 1 natural = falha + Sina.",
+      emoji: "🎲",
+    },
+    {
+      titulo: "Doom Clocks",
+      texto: "Cinco relógios pulsam o tempo todo: ✨ Esperança da Élite, 🩸 Sina da Pandórica, ⚰ Doom global, ⌛ Arco, ⚡ Situacional. Eles avançam por escolhas.",
+      emoji: "✨",
+    },
+    {
+      titulo: "Combate",
+      texto: "Quando o Mestre dispara [INITIATIVE], o tracker de combate aparece + mapa tático com tokens. Click no teu token, depois numa célula pra mover.",
+      emoji: "⚔",
+    },
+    {
+      titulo: "Pergaminhos & Histórico",
+      texto: "📜 guarda notas, missões, NPCs. 📚 mostra rodadas anteriores. 🪶 traz o recap do Cronista. ⊟/⊞ é modo zen (foco total no log).",
+      emoji: "📜",
+    },
+  ];
+  const atual = passos[step];
+  const ehUltimo = step === passos.length - 1;
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/85 px-3 sm:px-6 py-4 sm:py-8">
+      <div className="bg-[var(--color-carvao)] border border-[var(--color-dourado)] rounded-lg p-6 sm:p-8 max-w-lg w-full epico-entrada">
+        <div className="text-center mb-4">
+          <div className="text-5xl mb-3">{atual.emoji}</div>
+          <h2 className="text-xl sm:text-2xl text-[var(--color-dourado)] dourado-glow font-[family-name:var(--font-cinzel)]">{atual.titulo}</h2>
+        </div>
+        <p className="text-sm sm:text-base text-[var(--color-pergaminho)] italic text-center leading-relaxed mb-6">
+          {atual.texto}
+        </p>
+        <div className="flex items-center justify-between gap-3">
+          <button
+            onClick={onClose}
+            className="text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"
+          >
+            Pular
+          </button>
+          <div className="flex gap-1">
+            {passos.map((_, i) => (
+              <span key={i} className={`w-1.5 h-1.5 rounded-full ${i === step ? "bg-[var(--color-dourado)]" : "bg-[var(--color-pergaminho-velho)]/30"}`} />
+            ))}
+          </div>
+          <button
+            onClick={() => {
+              if (ehUltimo) onClose();
+              else setStep((s) => s + 1);
+            }}
+            className="btn-selo text-xs"
+          >
+            {ehUltimo ? "Atravessar a soleira" : "Próximo"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Sprint O — ClocksHelpModal: explica os 5 doom clocks.
+ */
+function ClocksHelpModal({ onClose }: { onClose: () => void }) {
+  const items = [
+    { emoji: "✨", nome: "Esperança da Élite", desc: "Moeda dramática dos players. Sobe quando alguém tira 20 natural. Player invoca pra ganhar vantagem ou sucesso narrativo improvável." },
+    { emoji: "🩸", nome: "Sina da Pandórica", desc: "Moeda do Mestre. Sobe quando alguém tira 1 natural. Mestre gasta pra escalar complicação (NPC aparece em momento ruim, item quebra, alarme dispara)." },
+    { emoji: "⚰", nome: "Doom Global (12)", desc: "A Vierta acorda. Avança quando PCs gastam tempo lateral ou ignoram urgência. Quando lota: evento apocalíptico." },
+    { emoji: "⌛", nome: "Arco (8)", desc: "Vilão da temporada se aproxima. Avança a cada falha estratégica. Quando lota: confronto inevitável." },
+    { emoji: "⚡", nome: "Situacional (4-6)", desc: "Pressão imediata. Perseguição, ritual sendo conjurado, suspeita de alguém. Quando lota: cena bate o teto. Reseta entre cenas." },
+  ];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 px-3 sm:px-6 py-4 sm:py-8" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="bg-[var(--color-carvao)] border border-[var(--color-dourado)] rounded-lg p-4 sm:p-6 max-w-2xl w-full max-h-[85vh] overflow-y-auto">
+        <div className="flex items-baseline justify-between mb-4">
+          <h2 className="text-xl sm:text-2xl text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">⏳ Os Cinco Relógios</h2>
+          <button onClick={onClose} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xs uppercase tracking-widest">Fechar</button>
+        </div>
+        <div className="space-y-3">
+          {items.map((it) => (
+            <div key={it.nome} className="border border-[var(--color-pergaminho-velho)]/20 rounded p-3">
+              <div className="flex items-baseline gap-3 mb-1">
+                <span className="text-xl">{it.emoji}</span>
+                <h3 className="text-sm uppercase tracking-widest text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">{it.nome}</h3>
+              </div>
+              <p className="text-xs sm:text-sm text-[var(--color-pergaminho)] italic leading-relaxed">{it.desc}</p>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
@@ -3396,9 +3540,26 @@ function MapaTatico({
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [novoInimigo, setNovoInimigo] = useState("");
+  const [hoverCell, setHoverCell] = useState<{ x: number; y: number } | null>(null);
   const cellSize = 32;
   const w = map.width;
   const h = map.height;
+  // Sprint O — background SVG por terrain
+  const terrainGradient: Record<string, [string, string]> = {
+    tavern: ["#3a2418", "#1a1612"],
+    forest: ["#1a3320", "#0a1f12"],
+    dungeon: ["#1f1a14", "#0a0808"],
+    cave: ["#2a2218", "#100a08"],
+    sea: ["#1a3850", "#0a1828"],
+    desert: ["#3a2e18", "#1a1408"],
+    snow: ["#2a3848", "#101820"],
+    street: ["#2a2418", "#1a1612"],
+    palace: ["#3a2810", "#1a1408"],
+    temple: ["#2a2030", "#101020"],
+    swamp: ["#1a2818", "#0a1a08"],
+    mountain: ["#28282e", "#1a1a20"],
+  };
+  const [c1, c2] = terrainGradient[map.terrain || "tavern"] || terrainGradient.tavern;
 
   // Player só pode mover seu próprio token
   function podeMover(t: MapToken): boolean {
@@ -3443,38 +3604,77 @@ function MapaTatico({
       <div className="overflow-auto">
         <svg
           viewBox={`0 0 ${w * cellSize} ${h * cellSize}`}
-          className="block max-w-full mx-auto rounded border border-[var(--color-pergaminho-velho)]/30 bg-[var(--color-noite)]/30"
+          className="block max-w-full mx-auto rounded border border-[var(--color-pergaminho-velho)]/30"
           style={{ maxHeight: 360 }}
         >
+          {/* Sprint O — Background gradient por terrain */}
+          <defs>
+            <radialGradient id="terrainGrad" cx="50%" cy="50%" r="65%">
+              <stop offset="0%" stopColor={c1} stopOpacity="1" />
+              <stop offset="100%" stopColor={c2} stopOpacity="1" />
+            </radialGradient>
+          </defs>
+          <rect width={w * cellSize} height={h * cellSize} fill="url(#terrainGrad)" />
           {/* Grid */}
           {Array.from({ length: w }).map((_, x) =>
-            Array.from({ length: h }).map((_, y) => (
-              <rect
-                key={`${x}-${y}`}
-                x={x * cellSize}
-                y={y * cellSize}
-                width={cellSize}
-                height={cellSize}
-                fill="transparent"
-                stroke="rgba(212,165,116,0.15)"
-                onClick={() => {
-                  if (!selectedId) return;
-                  const t = map.tokens.find((tk) => tk.id === selectedId);
-                  if (!t || !podeMover(t)) return;
-                  onMoveToken(selectedId, x, y);
-                  setSelectedId(null);
-                }}
-                style={{ cursor: selectedId ? "pointer" : "default" }}
-              />
-            ))
+            Array.from({ length: h }).map((_, y) => {
+              // Sprint O — measure: highlight cells dentro do alcance do token selecionado (5 casas = 9m em 5e-style)
+              const sel = selectedId ? map.tokens.find((t) => t.id === selectedId) : null;
+              const inRange = sel ? Math.max(Math.abs(sel.x - x), Math.abs(sel.y - y)) <= 6 : false;
+              return (
+                <rect
+                  key={`${x}-${y}`}
+                  x={x * cellSize}
+                  y={y * cellSize}
+                  width={cellSize}
+                  height={cellSize}
+                  fill={inRange ? "rgba(201,169,97,0.06)" : "transparent"}
+                  stroke="rgba(212,165,116,0.15)"
+                  onClick={() => {
+                    if (!selectedId) return;
+                    const t = map.tokens.find((tk) => tk.id === selectedId);
+                    if (!t || !podeMover(t)) return;
+                    onMoveToken(selectedId, x, y);
+                    setSelectedId(null);
+                    setHoverCell(null);
+                  }}
+                  onMouseEnter={() => selectedId && setHoverCell({ x, y })}
+                  onMouseLeave={() => setHoverCell(null)}
+                  style={{ cursor: selectedId ? "pointer" : "default" }}
+                />
+              );
+            })
           )}
-          {/* Tokens */}
+          {/* Sprint O — measurement: linha pontilhada do token selecionado pra hover */}
+          {selectedId && hoverCell && (() => {
+            const t = map.tokens.find((tk) => tk.id === selectedId);
+            if (!t) return null;
+            const tSize = t.size || 1;
+            const x1 = (t.x + tSize / 2) * cellSize;
+            const y1 = (t.y + tSize / 2) * cellSize;
+            const x2 = (hoverCell.x + 0.5) * cellSize;
+            const y2 = (hoverCell.y + 0.5) * cellSize;
+            const cells = Math.max(Math.abs(t.x - hoverCell.x), Math.abs(t.y - hoverCell.y));
+            const metros = cells * 1.5; // 1 célula = 1.5m (5 ft 5e)
+            return (
+              <g pointerEvents="none">
+                <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="#c9a961" strokeWidth="1.5" strokeDasharray="4 3" opacity="0.7" />
+                <rect x={x2 + 8} y={y2 - 14} width="48" height="14" rx="2" fill="rgba(0,0,0,0.7)" />
+                <text x={x2 + 32} y={y2 - 4} textAnchor="middle" fill="#ffd700" fontSize="9" fontFamily="var(--font-cinzel)">
+                  {metros}m
+                </text>
+              </g>
+            );
+          })()}
+          {/* Tokens (Sprint O — size: 1=medium, 2=large, 3=huge) */}
           {map.tokens.map((t) => {
-            const cx = t.x * cellSize + cellSize / 2;
-            const cy = t.y * cellSize + cellSize / 2;
-            const r = cellSize / 2 - 3;
+            const tSize = t.size || 1;
+            const cx = (t.x + tSize / 2) * cellSize;
+            const cy = (t.y + tSize / 2) * cellSize;
+            const r = (cellSize * tSize) / 2 - 3;
             const ehSelecionado = selectedId === t.id;
             const podeInteragir = podeMover(t);
+            const fontSize = tSize === 1 ? 10 : tSize === 2 ? 14 : 18;
             return (
               <g
                 key={t.id}
@@ -3498,10 +3698,10 @@ function MapaTatico({
                   strokeWidth={ehSelecionado ? 3 : 1.5}
                 />
                 <text
-                  x={cx} y={cy + 4}
+                  x={cx} y={cy + fontSize / 3}
                   textAnchor="middle"
                   fill="#1a1612"
-                  fontSize="10"
+                  fontSize={fontSize}
                   fontWeight="bold"
                   fontFamily="var(--font-cinzel)"
                   pointerEvents="none"

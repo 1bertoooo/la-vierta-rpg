@@ -60,9 +60,10 @@ export default function CriacaoPage({
   const [gerandoHistoria, setGerandoHistoria] = useState(false);
 
   const [retratoEscolhido, setRetratoEscolhido] = useState<string | null>(null);
-  const [retratoSeeds, setRetratoSeeds] = useState<number[]>([1, 2, 3, 4]);
-  // Counter forçar React refazer img mesmo se URL repetir
-  const [retratoVersion, setRetratoVersion] = useState(0);
+  const [retratoSeeds, setRetratoSeeds] = useState<number[]>([0, 0, 0, 0]);
+  // Estado por slot: 'pendente' | 'carregando' | 'ok' | 'erro'
+  const [retratoEstados, setRetratoEstados] = useState<("pendente" | "carregando" | "ok" | "erro")[]>(["pendente", "pendente", "pendente", "pendente"]);
+  const [retratoIniciado, setRetratoIniciado] = useState(false);
 
   const [erro, setErro] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -123,14 +124,44 @@ export default function CriacaoPage({
   }
 
   function regerarRetratos() {
-    setRetratoSeeds([
+    const novosSeeds = [
       Math.floor(Math.random() * 1000000),
       Math.floor(Math.random() * 1000000),
       Math.floor(Math.random() * 1000000),
       Math.floor(Math.random() * 1000000),
-    ]);
+    ];
+    setRetratoSeeds(novosSeeds);
+    setRetratoEstados(["carregando", "pendente", "pendente", "pendente"]);
     setRetratoEscolhido(null);
-    setRetratoVersion((v) => v + 1);
+    setRetratoIniciado(true);
+  }
+
+  function regerarSlot(idx: number) {
+    const novoSeed = Math.floor(Math.random() * 1000000);
+    setRetratoSeeds((prev) => {
+      const c = [...prev];
+      c[idx] = novoSeed;
+      return c;
+    });
+    setRetratoEstados((prev) => {
+      const c = [...prev];
+      c[idx] = "carregando";
+      return c;
+    });
+  }
+
+  // Quando um slot termina (ok ou erro), começa o próximo pendente
+  function onSlotConcluido(idx: number, status: "ok" | "erro") {
+    setRetratoEstados((prev) => {
+      const c = [...prev];
+      c[idx] = status;
+      // Acha o próximo pendente
+      const proxIdx = c.findIndex((s) => s === "pendente");
+      if (proxIdx >= 0) {
+        c[proxIdx] = "carregando";
+      }
+      return c;
+    });
   }
 
   async function gerarHistoriaIA() {
@@ -542,43 +573,87 @@ export default function CriacaoPage({
             </p>
 
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
-              {retratoSeeds.map((seed) => {
+              {retratoSeeds.map((seed, idx) => {
+                const estado = retratoEstados[idx];
                 const url = buildPollinationsUrl(
-                  promptRetrato({
-                    raca,
-                    classe,
-                    sexo: sexo || undefined,
-                    aparencia,
-                  }),
-                  seed
+                  promptRetrato({ raca, classe, sexo: sexo || undefined, aparencia }),
+                  seed || 1
                 );
-                const escolhido = retratoEscolhido === url;
-                // key composto força React a refazer img mesmo se URL/seed mudar
-                const imgKey = `${seed}-${retratoVersion}`;
+                const escolhido = retratoEscolhido === url && estado === "ok";
+                const imgKey = `${seed}-${idx}`;
+
                 return (
-                  <button
+                  <div
                     key={imgKey}
-                    onClick={() => setRetratoEscolhido(url)}
                     className={`relative aspect-square rounded-lg overflow-hidden border-2 transition ${
                       escolhido
                         ? "border-[var(--color-dourado)] ring-2 ring-[var(--color-dourado)]/40"
                         : "border-[var(--color-pergaminho-velho)]/30 hover:border-[var(--color-dourado)]/60"
                     }`}
                   >
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      key={imgKey}
-                      src={url}
-                      alt={`Retrato ${seed}`}
-                      className="w-full h-full object-cover"
-                      loading="lazy"
-                    />
-                    {escolhido && (
-                      <div className="absolute inset-0 bg-[var(--color-dourado)]/10 flex items-center justify-center">
-                        <span className="text-[var(--color-dourado-claro)] text-3xl dourado-glow">✓</span>
+                    {/* Pendente: aguardando a vez */}
+                    {estado === "pendente" && (
+                      <div className="w-full h-full flex items-center justify-center bg-[var(--color-carvao)]/60">
+                        <span className="text-[var(--color-pedra)] text-xs">aguardando</span>
                       </div>
                     )}
-                  </button>
+
+                    {/* Erro: botão retry */}
+                    {estado === "erro" && (
+                      <div className="w-full h-full flex flex-col items-center justify-center gap-2 bg-[var(--color-carvao)]/60 p-2">
+                        <span className="text-[var(--color-sangue)] text-xs">falhou</span>
+                        <button
+                          onClick={() => regerarSlot(idx)}
+                          className="text-[10px] uppercase tracking-widest text-[var(--color-dourado)] hover:text-[var(--color-dourado-claro)] border border-[var(--color-dourado)] rounded px-2 py-1"
+                        >
+                          ↻ tentar
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Carregando ou OK: tem img + spinner ou check */}
+                    {(estado === "carregando" || estado === "ok") && (
+                      <button
+                        onClick={() => estado === "ok" && setRetratoEscolhido(url)}
+                        disabled={estado !== "ok"}
+                        className="w-full h-full block relative"
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          key={imgKey}
+                          src={url}
+                          alt={`Retrato ${idx + 1}`}
+                          className={`w-full h-full object-cover ${estado === "carregando" ? "opacity-50" : ""}`}
+                          onLoad={() => onSlotConcluido(idx, "ok")}
+                          onError={() => onSlotConcluido(idx, "erro")}
+                        />
+                        {estado === "carregando" && (
+                          <div className="absolute inset-0 flex items-center justify-center bg-[var(--color-carvao)]/40">
+                            <span className="text-[var(--color-dourado)] text-xs italic animate-pulse">forjando…</span>
+                          </div>
+                        )}
+                        {escolhido && (
+                          <div className="absolute inset-0 bg-[var(--color-dourado)]/10 flex items-center justify-center">
+                            <span className="text-[var(--color-dourado-claro)] text-3xl dourado-glow">✓</span>
+                          </div>
+                        )}
+                      </button>
+                    )}
+
+                    {/* Botão re-roll individual sempre disponível (exceto carregando) */}
+                    {estado !== "carregando" && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          regerarSlot(idx);
+                        }}
+                        className="absolute top-1 right-1 w-6 h-6 rounded-full bg-[var(--color-carvao)]/80 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-dourado)] text-xs hover:border-[var(--color-dourado)] z-10"
+                        title="Trocar este retrato"
+                      >
+                        ↻
+                      </button>
+                    )}
+                  </div>
                 );
               })}
             </div>

@@ -1239,15 +1239,18 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     }
   }
 
-  async function chamarDM(prompt: string, opts: { isOpening?: boolean; silent?: boolean } = {}) {
-    if (!campaign || !sessionId || aguardandoIA) return;
-    const { isOpening = false, silent = false } = opts;
+  async function chamarDM(prompt: string, opts: { isOpening?: boolean; silent?: boolean; force?: boolean } = {}) {
+    if (!campaign || !sessionId) return;
+    const { isOpening = false, silent = false, force = false } = opts;
+    // Sprint Q — se aguardandoIA ficou preso (ex: chamada antiga que nunca terminou),
+    // o admin pode forçar via "Provocar Mestre" (force=true) que ignora o flag.
+    if (aguardandoIA && !force) return;
 
     // Lock atômico: previne 2 jogadores chamarem DM simultaneamente.
     const sb = getSupabase();
     try {
       const { data: locked } = await sb.rpc("try_lock_dm", { p_session_id: sessionId });
-      if (locked === false) {
+      if (locked === false && !force) {
         await logEvent({
           actor_type: "system",
           event_type: "info",
@@ -1599,10 +1602,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     // Fora de combate: usa buffer turn-based real.
     const sb = getSupabase();
     const totalAtivos = jogadoresAtivos.length;
-    if (totalAtivos === 0) {
-      // Fallback solo (sem player records ativos): wrap como rodada de 1 pra
-      // o DM NÃO interpretar como "aguardando os outros".
-      // Bug T1 — antes ficava "aguardando os outros" preso, sem progredir.
+    // Sprint Q — Solo player bypass: se sou o único ativo (ou nenhum ativo),
+    // skipa o buffer e chama Mestre direto. Buffer só faz sentido com 2+ jogadores ativos.
+    // Antes: totalAtivos === 1 caía no buffer e podia travar (Bug Q1) se algo no flushRound falhasse silenciosamente.
+    const souSoloAtivo =
+      totalAtivos === 0 ||
+      (totalAtivos === 1 && jogadoresAtivos[0]?.id === me.id);
+    if (souSoloAtivo) {
+      // Wrap como rodada de 1 pra o DM NÃO interpretar como "aguardando os outros".
       const wrapper = `[Rodada — solo player]\n@${me.nick || "viajante"}: ${txt}\n\nNarre o resultado tratando como rodada completa de 1 jogador.`;
       // Loga como speak normal (não silent — player vê sua ação no chat)
       await logEvent({
@@ -1610,6 +1617,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         event_type: "speak",
         payload: { text: txt, nick: me.nick || "viajante" },
       });
+      // Garante phase=idle (caso esteja preso) antes de invocar o Mestre
+      try {
+        await sb.rpc("complete_round", { p_session_id: sessionId });
+      } catch {}
       await chamarDM(wrapper, { silent: true });
       return;
     }
@@ -2011,6 +2022,29 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             <div className="mt-6 pt-4 border-t border-[var(--color-pergaminho-velho)]/20 space-y-2">
               <button onClick={setTurnoProximo} className="text-xs text-[var(--color-dourado)] hover:text-[var(--color-dourado-claro)] uppercase tracking-widest block">
                 ▸ Passar turno
+              </button>
+              {/* Sprint Q — admin força o Mestre a responder mesmo se o jogo empacou */}
+              <button
+                onClick={async () => {
+                  if (!sessionId) return;
+                  // Reseta state-machine e dispara DM com último contexto
+                  try {
+                    const sb = getSupabase();
+                    await sb.rpc("force_complete_round", { p_session_id: sessionId });
+                    await sb.rpc("release_dm_lock", { p_session_id: sessionId });
+                  } catch {}
+                  // Força aguardandoIA = false caso esteja preso
+                  setAguardandoIA(false);
+                  // Chama o Mestre direto com prompt de continuidade (force ignora aguardandoIA preso e lock)
+                  await chamarDM(
+                    `[Sistema — provocação admin]\nO grupo está paralisado, parece que algo travou. Continue a cena de onde parou; se o último jogador deixou uma ação no ar, responda agora. Se nada óbvio, abra um momento de tensão suave que reaqueça a mesa.`,
+                    { silent: true, force: true }
+                  );
+                }}
+                className="text-xs text-[var(--color-dourado)] hover:text-[var(--color-dourado-claro)] uppercase tracking-widest block"
+                title="Se o jogo empacou, força o Mestre a continuar"
+              >
+                ⚡ Provocar Mestre
               </button>
               {/* Sprint D Bug 2 — pular jogador AFK na rodada atual */}
               {roundPhase === "collecting" && (

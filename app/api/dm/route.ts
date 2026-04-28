@@ -20,6 +20,7 @@ type Body = {
     time_of_day?: string;
     weather?: string;
     in_combat?: boolean;
+    campaign_summary?: string;
   };
 };
 
@@ -204,6 +205,11 @@ export async function POST(req: Request) {
         }
       }
       ctxStr = "\n\n## CONTEXTO ATUAL\n" + parts.join("\n");
+
+      // Sumário rolante — anti voice drift. Ancora memória profunda da campanha.
+      if (context.campaign_summary && context.campaign_summary.length > 50) {
+        ctxStr += "\n\n## MEMÓRIA DA CAMPANHA (briefing do Cronista — usa pra coerência)\n" + context.campaign_summary;
+      }
     }
 
     const systemPrompt = `${DM_CORE}\n\n${lore}${ctxStr}`;

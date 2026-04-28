@@ -214,6 +214,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   });
   // Aside privado pra mim (info que personagem viu, outros não)
   const [asideRecebido, setAsideRecebido] = useState<string | null>(null);
+  // Sumário rolante de campanha (anti voice drift do LLM)
+  const [campaignSummary, setCampaignSummary] = useState<string>("");
+  const [summaryEventCount, setSummaryEventCount] = useState<number>(0);
+  const summarizingRef = useRef(false);
   // Anti-flicker / cleanup do timeout do mestre
   const mestreTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Channel pra broadcast "Mestre invocando" entre clients (não-DB, mais rápido)
@@ -391,14 +395,16 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             const { data: events } = await sb.from("combat_log").select("*").eq("session_id", sId as string).order("created_at", { ascending: true }).limit(200);
             if (!cancelled) setLog((events as LogEvent[]) || []);
 
-            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather, doom_clocks").eq("id", sId).maybeSingle();
+            const { data: sess } = await sb.from("sessions").select("current_turn_player_id, in_combat, time_of_day, weather, doom_clocks, summary, summary_event_count").eq("id", sId).maybeSingle();
             if (!cancelled && sess) {
-              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }> };
+              const s = sess as { current_turn_player_id: string | null; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number };
               setCurrentTurnUserId(s.current_turn_player_id);
               setEmCombate(!!s.in_combat);
               if (s.time_of_day) setTimeOfDay(s.time_of_day);
               if (s.weather) setWeather(s.weather);
               if (s.doom_clocks) setDoomClocks(s.doom_clocks);
+              if (s.summary) setCampaignSummary(s.summary);
+              if (typeof s.summary_event_count === "number") setSummaryEventCount(s.summary_event_count);
             }
 
             // Iniciativa do combate atual (resilient se tabela ainda não migrada)
@@ -517,12 +523,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           ).on(
             "postgres_changes", { event: "UPDATE", schema: "public", table: "sessions", filter: `id=eq.${sId}` },
             (payload) => {
-              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }> };
+              const sess = payload.new as { current_turn_player_id: string | null; music_mood?: string; in_combat?: boolean; time_of_day?: string; weather?: string; doom_clocks?: Record<string, { max: number; current: number; label?: string }>; summary?: string; summary_event_count?: number };
               setCurrentTurnUserId(sess.current_turn_player_id);
               if (typeof sess.in_combat === "boolean") setEmCombate(sess.in_combat);
               if (sess.time_of_day) setTimeOfDay(sess.time_of_day);
               if (sess.weather) setWeather(sess.weather);
               if (sess.doom_clocks) setDoomClocks(sess.doom_clocks);
+              if (sess.summary !== undefined) setCampaignSummary(sess.summary);
+              if (typeof sess.summary_event_count === "number") setSummaryEventCount(sess.summary_event_count);
             }
           ).on(
             "postgres_changes", { event: "*", schema: "public", table: "combat_initiative", filter: `session_id=eq.${sId}` },
@@ -923,9 +931,23 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             time_of_day: timeOfDay,
             weather: weather,
             in_combat: emCombate,
+            campaign_summary: campaignSummary,
           },
         }),
       });
+
+      // Trigger sumarização em background quando passa de 30 eventos do último sumário
+      // Roda só na máquina do admin pra evitar 4 chamadas paralelas
+      if (isAdmin && !summarizingRef.current && log.length - summaryEventCount >= 30 && sessionId && campaign) {
+        summarizingRef.current = true;
+        fetch("/api/summarize", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, campaign_id: campaign.id }),
+        }).catch(() => {}).finally(() => {
+          setTimeout(() => { summarizingRef.current = false; }, 120000); // cooldown 2min
+        });
+      }
       // Captura resposta como texto antes de parsear — pra não dar JSON parse error
       const raw = await r.text();
       let data: { error?: string; details?: string[]; text?: string; directives?: { roll?: string; music_mood?: string }; provider?: string } = {};
@@ -1295,6 +1317,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           </button>
           <div className={`${showLiga ? "block" : "hidden"} lg:block`}>
           <h2 className="hidden lg:block text-xs uppercase tracking-widest text-[var(--color-pergaminho-velho)] mb-3">Liga</h2>
+          <SpotlightBar players={players} log={log} />
           <ul className="space-y-2">
             {players.map((p) => {
               const ch = characters[p.user_id || ""];
@@ -1783,6 +1806,52 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           <p className="text-xs text-[var(--color-pergaminho)] italic whitespace-pre-wrap leading-relaxed">{char.background}</p>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * SpotlightBar — quanto cada player falou nos últimos 30 eventos.
+ * Robin Laws: ninguém esquecido. Ideal: ~25% cada. Mostra desbalanço.
+ */
+function SpotlightBar({ players, log }: { players: Player[]; log: LogEvent[] }) {
+  const recent = log.slice(-30).filter((e) => e.actor_type === "player" && (e.event_type === "speak" || e.event_type === "roll"));
+  if (recent.length < 4) return null;
+
+  const counts = new Map<string, number>();
+  for (const e of recent) {
+    const nick = (e.payload?.nick as string) || "?";
+    counts.set(nick, (counts.get(nick) || 0) + 1);
+  }
+  const total = recent.length;
+  const playersComUserId = players.filter((p) => p.user_id);
+  if (playersComUserId.length === 0) return null;
+
+  const lowest = Math.min(...playersComUserId.map((p) => counts.get(p.display_name) || 0));
+  const desbalanco = total > 0 && lowest === 0;
+
+  return (
+    <div className="mb-4">
+      <div className="flex items-baseline justify-between mb-1">
+        <span className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)]">Spotlight ({recent.length})</span>
+        {desbalanco && <span className="text-[9px] text-[var(--color-sangue)] animate-pulse" title="Player silenciado">⚠</span>}
+      </div>
+      <div className="space-y-1">
+        {playersComUserId.map((p) => {
+          const c = counts.get(p.display_name) || 0;
+          const pct = total > 0 ? (c / total) * 100 : 0;
+          const cor = c === 0 ? "bg-[var(--color-sangue)]/40" : pct >= 25 ? "bg-[var(--color-dourado)]/60" : "bg-[var(--color-vinho)]/60";
+          return (
+            <div key={p.id} className="flex items-center gap-1.5 text-[9px]">
+              <span className="w-12 truncate text-[var(--color-pergaminho-velho)]">{p.display_name.split(" ")[0]}</span>
+              <div className="flex-1 h-1 bg-[var(--color-carvao)] rounded-full overflow-hidden">
+                <div className={`h-full ${cor} transition-all`} style={{ width: `${pct}%` }} />
+              </div>
+              <span className="text-[8px] text-[var(--color-pergaminho-velho)] w-4 text-right">{c}</span>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

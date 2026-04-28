@@ -98,7 +98,17 @@ function log(...args: unknown[]) {
 export function audioInit() {
   if (typeof window === "undefined") return;
   const v = localStorage.getItem(VOL_KEY);
-  if (v) masterVolume = parseFloat(v);
+  if (v) {
+    const parsed = parseFloat(v);
+    // Recovery: se volume tá em 0 ou muito baixo (test legado, mudança de escala),
+    // reseta pra default. Players podem baixar de novo no painel.
+    if (isNaN(parsed) || parsed < 0.02) {
+      masterVolume = 0.18;
+      try { localStorage.setItem(VOL_KEY, String(masterVolume)); } catch {}
+    } else {
+      masterVolume = parsed;
+    }
+  }
 }
 
 export function audioSetVolume(v: number) {
@@ -125,6 +135,10 @@ export function audioGetCurrentMood(): Mood | null {
   return currentMood;
 }
 
+// Mood pendente — quando play() bloqueia por autoplay, marcamos pra retry
+// no próximo user gesture
+let pendingMood: Mood | null = null;
+
 export function audioPlayMood(mood: Mood) {
   if (typeof window === "undefined") return;
   if (audioIsMuted()) {
@@ -133,11 +147,11 @@ export function audioPlayMood(mood: Mood) {
   }
   if (mood === currentMood && currentAudio && !currentAudio.paused) return;
 
-  log("trocando mood pra", mood);
+  log("trocando mood pra", mood, "vol=", masterVolume);
 
   if (currentAudio) {
     currentAudio.pause();
-    currentAudio.src = "";
+    try { currentAudio.removeAttribute("src"); currentAudio.load(); } catch {}
     currentAudio = null;
   }
 
@@ -149,14 +163,19 @@ export function audioPlayMood(mood: Mood) {
 
   const audio = new Audio(url);
   audio.loop = true;
-  audio.volume = masterVolume;
-  // SEM crossOrigin — same-origin via /api/music
+  audio.volume = Math.max(0.02, masterVolume); // mínimo audível como safety
   audio.preload = "auto";
-  audio.addEventListener("error", (e) => log("erro carregando", url, e));
-  audio.addEventListener("playing", () => log("playing", mood));
+  audio.addEventListener("error", (e) => log("erro carregando", url, (e as ErrorEvent).message || e));
+  audio.addEventListener("playing", () => { log("✓ playing", mood, "vol=", audio.volume); pendingMood = null; });
+  audio.addEventListener("canplaythrough", () => log("can play through", mood));
 
   const p = audio.play();
-  if (p && p.catch) p.catch((err) => log("autoplay bloqueado:", err.message));
+  if (p && p.catch) {
+    p.catch((err) => {
+      log("✗ autoplay bloqueado:", err.message, "— marcando como pendingMood pra retry no próximo click");
+      pendingMood = mood;
+    });
+  }
 
   currentAudio = audio;
   currentMood = mood;
@@ -190,14 +209,26 @@ export function audioPlayFromNarration(opts: { explicit_mood?: string | null; te
 
 export function audioResumeIfBlocked() {
   if (audioIsMuted()) return;
-  if (currentAudio && currentAudio.paused) {
-    log("retomando bloqueado");
-    currentAudio.play().catch((e) => log("ainda bloqueado:", e.message));
+  // Caso 1: tem mood pendente (play() falhou antes) — tenta de novo
+  if (pendingMood) {
+    log("retry pendingMood:", pendingMood);
+    const m = pendingMood;
+    pendingMood = null;
+    audioPlayMood(m);
     return;
   }
-  // Nenhum áudio iniciado ainda — começa um mood default ao primeiro click
-  if (!currentAudio && !audioIsMuted()) {
-    log("primeiro click do user — iniciando tavern");
+  // Caso 2: tem audio mas pausado — retoma
+  if (currentAudio && currentAudio.paused) {
+    log("retomando audio pausado");
+    currentAudio.play().catch((e) => {
+      log("ainda bloqueado:", e.message);
+      pendingMood = currentMood || "tavern";
+    });
+    return;
+  }
+  // Caso 3: nada iniciado — começa tavern
+  if (!currentAudio) {
+    log("primeiro click — iniciando tavern");
     audioPlayMood("tavern");
   }
 }

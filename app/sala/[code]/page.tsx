@@ -208,6 +208,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   // Pergaminhos (notas + quests + NPCs)
   const [showPergaminhos, setShowPergaminhos] = useState(false);
   const [showHistorico, setShowHistorico] = useState(false); // Sprint J — round history modal
+  const [showRecap, setShowRecap] = useState(false); // Sprint L — recap da campanha
+  const [showZen, setShowZen] = useState(false); // Sprint M — modo zen full-screen
   const [notas, setNotas] = useState<NotaItem[]>([]);
   const [quests, setQuests] = useState<QuestItem[]>([]);
   const [npcsConhecidos, setNpcsConhecidos] = useState<NpcItem[]>([]);
@@ -1799,7 +1801,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       {ambienteOverlay && (
         <div className="pointer-events-none fixed inset-0 z-[5] mix-blend-multiply transition-opacity duration-1000" />
       )}
-      <header className="border-b border-[var(--color-pergaminho-velho)]/20 px-3 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2 sm:gap-3 flex-wrap">
+      <header className={`border-b border-[var(--color-pergaminho-velho)]/20 px-3 sm:px-4 py-2 sm:py-3 flex items-center justify-between gap-2 sm:gap-3 flex-wrap ${showZen ? "opacity-30 hover:opacity-100 transition" : ""}`}>
         <Link href="/" className="text-[10px] sm:text-xs uppercase tracking-[0.2em] sm:tracking-[0.3em] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">← <span className="hidden sm:inline">La Vierta</span></Link>
         <div className="flex-1 text-center min-w-0 hidden sm:block">
           <span className="text-xs uppercase tracking-widest text-[var(--color-pedra)] truncate block">
@@ -1825,6 +1827,16 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           <button onClick={() => setShowHistorico(true)} title="Histórico de rodadas"
             className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
             📚
+          </button>
+          {/* Sprint L — Recap da campanha (Cronista) */}
+          <button onClick={() => setShowRecap(true)} title="Recap — resumo da campanha"
+            className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
+            🪶
+          </button>
+          {/* Sprint M — Modo zen */}
+          <button onClick={() => setShowZen((s) => !s)} title="Modo zen (oculta tudo)"
+            className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
+            {showZen ? "⊞" : "⊟"}
           </button>
           {/* Painel de áudio unificado */}
           <div className="relative">
@@ -1870,7 +1882,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
       <div className="flex-1 flex flex-col lg:flex-row max-w-7xl w-full mx-auto">
         {/* Liga */}
-        <aside className="lg:w-56 border-b lg:border-b-0 lg:border-r border-[var(--color-pergaminho-velho)]/20 p-3 sm:p-4">
+        <aside className={`lg:w-56 border-b lg:border-b-0 lg:border-r border-[var(--color-pergaminho-velho)]/20 p-3 sm:p-4 ${showZen ? "hidden lg:hidden" : ""}`}>
           <button
             onClick={() => setShowLiga((s) => !s)}
             className="lg:hidden w-full flex items-baseline justify-between text-xs uppercase tracking-widest text-[var(--color-dourado)] mb-2"
@@ -2145,7 +2157,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         </section>
 
         {/* Ficha */}
-        <aside className="lg:w-72 border-t lg:border-t-0 lg:border-l border-[var(--color-pergaminho-velho)]/20 p-4 overflow-y-auto">
+        <aside className={`lg:w-72 border-t lg:border-t-0 lg:border-l border-[var(--color-pergaminho-velho)]/20 p-4 overflow-y-auto ${showZen ? "hidden lg:hidden" : ""}`}>
           <button onClick={() => setShowFicha((s) => !s)} className="lg:hidden text-xs uppercase tracking-widest text-[var(--color-dourado)] mb-3">
             {showFicha ? "▲" : "▼"} Ficha
           </button>
@@ -2289,6 +2301,24 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
         />
       )}
 
+      {/* Sprint L — Recap modal */}
+      {showRecap && (
+        <RecapModal
+          summary={campaignSummary}
+          onClose={() => setShowRecap(false)}
+          onRefresh={async () => {
+            if (!sessionId || !campaign) return;
+            try {
+              await fetch("/api/summarize", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ session_id: sessionId, campaign_id: campaign.id }),
+              });
+            } catch {}
+          }}
+        />
+      )}
+
       {/* Modal reset */}
       {showResetModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 px-6">
@@ -2318,6 +2348,19 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 }
 
 function LogEntry({ ev, myUserId, onReplay }: { ev: LogEvent; myUserId: string | undefined; onReplay: (text: string) => void }) {
+  // Sprint M — emoji reactions locais (localStorage por event id)
+  const [reactions, setReactions] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try { return JSON.parse(localStorage.getItem(`la-vierta-reactions-${ev.id}`) || "[]"); } catch { return []; }
+  });
+  const toggleReaction = (e: string) => {
+    setReactions((cur) => {
+      const next = cur.includes(e) ? cur.filter((x) => x !== e) : [...cur, e];
+      try { localStorage.setItem(`la-vierta-reactions-${ev.id}`, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
   if (ev.actor_type === "dm") {
     const textRaw = (ev.payload.text as string) || "";
     // Remove diretivas [TAG] e [TAG: ...] da exibição (continuam sendo processadas)
@@ -2329,8 +2372,40 @@ function LogEntry({ ev, myUserId, onReplay }: { ev: LogEvent; myUserId: string |
           <p className="text-xs uppercase tracking-widest text-[var(--color-dourado)]">Mestre</p>
           {provider && <span className="text-[9px] text-[var(--color-pedra)] uppercase">✦ {provider}</span>}
           <button onClick={() => onReplay(text)} className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] opacity-0 group-hover:opacity-100 transition" title="Ouvir de novo">↻</button>
+          {/* Sprint M — Share narração + emoji reactions */}
+          <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+            {["⚜","🔥","😱","💀","❤️"].map((e) => (
+              <button key={e} onClick={() => toggleReaction(e)}
+                className={`text-xs hover:scale-110 transition ${reactions.includes(e) ? "" : "grayscale opacity-50"}`}
+                title={`Reagir ${e}`}>
+                {e}
+              </button>
+            ))}
+            <button
+              onClick={() => {
+                const blob = new Blob([
+                  `La Vierta — Mestre\n\n${text}\n\n— ${new Date(ev.created_at).toLocaleString("pt-BR")}`,
+                ], { type: "text/plain" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                a.download = `la-vierta-${ev.id.slice(0,8)}.txt`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+              }}
+              className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"
+              title="Salvar narração"
+            >
+              💾
+            </button>
+          </div>
         </div>
         <p className="text-[var(--color-pergaminho)] leading-relaxed whitespace-pre-wrap">{text}</p>
+        {reactions.length > 0 && (
+          <div className="mt-1 flex gap-1">
+            {reactions.map((e) => <span key={e} className="text-sm">{e}</span>)}
+          </div>
+        )}
       </div>
     );
   }
@@ -2445,6 +2520,24 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
           );
         })}
       </div>
+
+      {/* Sprint L — Bloco extra: Iniciativa, Velocidade, Percepção passiva */}
+      {!compact && (
+        <div className="grid grid-cols-3 gap-1 text-center text-[10px]">
+          <div className="bg-[var(--color-carvao)]/40 border border-[var(--color-pergaminho-velho)]/20 rounded p-1.5">
+            <div className="uppercase text-[var(--color-pergaminho-velho)]">Iniciativa</div>
+            <div className="text-[var(--color-dourado)] text-sm">{(() => { const m = modAtributo(char.des_attr); return m >= 0 ? `+${m}` : `${m}`; })()}</div>
+          </div>
+          <div className="bg-[var(--color-carvao)]/40 border border-[var(--color-pergaminho-velho)]/20 rounded p-1.5">
+            <div className="uppercase text-[var(--color-pergaminho-velho)]">Velocidade</div>
+            <div className="text-[var(--color-dourado)] text-sm">{char.speed ?? 9}m</div>
+          </div>
+          <div className="bg-[var(--color-carvao)]/40 border border-[var(--color-pergaminho-velho)]/20 rounded p-1.5">
+            <div className="uppercase text-[var(--color-pergaminho-velho)]">Percep. Passiva</div>
+            <div className="text-[var(--color-dourado)] text-sm">{10 + modAtributo(char.sab_attr)}</div>
+          </div>
+        </div>
+      )}
 
       {!compact && char.inventory && char.inventory.length > 0 && (
         <div>
@@ -2973,6 +3066,55 @@ function HistoricoRodadasModal({
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Sprint L — RecapModal: mostra o sumário rolante de campanha (Cronista).
+ * Usa campaignSummary que é atualizado em background a cada 30 eventos.
+ */
+function RecapModal({
+  summary,
+  onClose,
+  onRefresh,
+}: {
+  summary: string;
+  onClose: () => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [refreshing, setRefreshing] = useState(false);
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 px-3 sm:px-6 py-4 sm:py-8" onClick={onClose}>
+      <div onClick={(e) => e.stopPropagation()} className="bg-[var(--color-carvao)] border border-[var(--color-dourado)] rounded-lg p-4 sm:p-6 max-w-2xl w-full max-h-[85vh] overflow-y-auto">
+        <div className="flex items-baseline justify-between mb-4">
+          <h2 className="text-xl sm:text-2xl text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">🪶 Recap da Campanha</h2>
+          <button onClick={onClose} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-xs uppercase tracking-widest">Fechar</button>
+        </div>
+        {summary ? (
+          <div className="prose prose-invert max-w-none">
+            <p className="text-sm sm:text-base text-[var(--color-pergaminho)] italic leading-relaxed whitespace-pre-wrap font-[family-name:var(--font-lora)]">
+              {summary}
+            </p>
+          </div>
+        ) : (
+          <p className="text-[var(--color-pergaminho-velho)] italic text-sm">
+            O Cronista ainda não escreveu o recap desta campanha.
+            <br />
+            <span className="text-xs">(Geralmente acontece após 30+ eventos. Clica em &ldquo;Pedir recap agora&rdquo; pra forçar.)</span>
+          </p>
+        )}
+        <button
+          onClick={async () => {
+            setRefreshing(true);
+            try { await onRefresh(); } finally { setTimeout(() => setRefreshing(false), 3000); }
+          }}
+          disabled={refreshing}
+          className="mt-6 text-xs uppercase tracking-widest text-[var(--color-dourado)] hover:text-[var(--color-dourado-claro)] disabled:opacity-50 border border-[var(--color-dourado)]/40 rounded px-3 py-1.5"
+        >
+          {refreshing ? "Cronista escrevendo…" : "🪶 Pedir recap agora"}
+        </button>
       </div>
     </div>
   );

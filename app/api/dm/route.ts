@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import { DM_CORE, selectRelevantLore } from "@/lib/dm-prompt";
 
-export const runtime = "edge";
+// Node runtime tem timeout 60s na Hobby (vs 25s no edge); preferimos pra GPT-5
+export const runtime = "nodejs";
+export const maxDuration = 60;
 
 type Msg = { role: "user" | "assistant" | "system"; content: string };
 
@@ -29,7 +31,8 @@ function pickProviders(): ProviderConfig[] {
     openai: {
       url: "https://api.openai.com/v1/chat/completions",
       apiKey: process.env.OPENAI_API_KEY,
-      model: process.env.DM_MODEL || "gpt-5",
+      // gpt-5-mini é mais rápido e mais barato; ainda mantém qualidade alta
+      model: process.env.DM_MODEL || "gpt-5-mini",
       name: "openai",
     },
     groq: {
@@ -48,30 +51,25 @@ function pickProviders(): ProviderConfig[] {
 
   const primary = configs[desired];
   const order: ProviderConfig[] = [];
-
   if (primary?.apiKey) order.push(primary);
-
-  // Fallback chain
   for (const key of ["openai", "groq", "anthropic"]) {
     const cfg = configs[key];
     if (cfg.apiKey && !order.find((p) => p.name === cfg.name)) {
       order.push(cfg);
     }
   }
-
   return order;
 }
 
 async function callOpenAI(cfg: ProviderConfig, messages: Msg[]): Promise<string> {
-  // GPT-5 é modelo de reasoning — reasoning_effort medium dá narrativa muito melhor que low.
-  // max_completion_tokens: 4000 dá folga pra reasoning_tokens + prosa épica.
   const isGPT5 = cfg.model.startsWith("gpt-5");
+  // reasoning_effort: low gera mais rápido (cabe em 25-50s) e ainda mantém qualidade boa
   const body = isGPT5
     ? {
         model: cfg.model,
         messages,
-        max_completion_tokens: 4000,
-        reasoning_effort: "medium",
+        max_completion_tokens: 3000,
+        reasoning_effort: "low",
       }
     : {
         model: cfg.model,
@@ -82,26 +80,36 @@ async function callOpenAI(cfg: ProviderConfig, messages: Msg[]): Promise<string>
         presence_penalty: 0.3,
         frequency_penalty: 0.2,
       };
-  const r = await fetch(cfg.url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${cfg.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const errText = await r.text();
-    throw new Error(`${cfg.name} ${r.status}: ${errText.slice(0, 200)}`);
+
+  // Timeout client-side em 50s pra dar fallback antes do edge timeout
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(() => ctrl.abort(), 50_000);
+
+  try {
+    const r = await fetch(cfg.url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${cfg.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => "");
+      throw new Error(`${cfg.name} ${r.status}: ${errText.slice(0, 200)}`);
+    }
+    const data = await r.json();
+    return data.choices?.[0]?.message?.content || "";
+  } finally {
+    clearTimeout(timeoutId);
   }
-  const data = await r.json();
-  return data.choices?.[0]?.message?.content || "";
 }
 
 async function callAnthropic(cfg: ProviderConfig, systemPrompt: string, userMessages: Msg[]): Promise<string> {
   const body = {
     model: cfg.model,
-    max_tokens: 700,
+    max_tokens: 900,
     temperature: 0.85,
     system: systemPrompt,
     messages: userMessages.map((m) => ({
@@ -109,29 +117,44 @@ async function callAnthropic(cfg: ProviderConfig, systemPrompt: string, userMess
       content: m.content,
     })),
   };
-  const r = await fetch(cfg.url, {
-    method: "POST",
-    headers: {
-      "x-api-key": cfg.apiKey!,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) {
-    const errText = await r.text();
-    throw new Error(`anthropic ${r.status}: ${errText.slice(0, 200)}`);
+  const ctrl = new AbortController();
+  const tid = setTimeout(() => ctrl.abort(), 50_000);
+  try {
+    const r = await fetch(cfg.url, {
+      method: "POST",
+      headers: {
+        "x-api-key": cfg.apiKey!,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+      signal: ctrl.signal,
+    });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => "");
+      throw new Error(`anthropic ${r.status}: ${errText.slice(0, 200)}`);
+    }
+    const data = await r.json();
+    return data.content?.[0]?.text || "";
+  } finally {
+    clearTimeout(tid);
   }
-  const data = await r.json();
-  return data.content?.[0]?.text || "";
 }
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as Body;
-    const { messages, context } = body;
+    let body: Body;
+    try {
+      body = (await req.json()) as Body;
+    } catch {
+      return NextResponse.json({ error: "Body inválido" }, { status: 400 });
+    }
 
-    // Monta system prompt com lore relevante on demand
+    const { messages, context } = body;
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return NextResponse.json({ error: "Messages vazio" }, { status: 400 });
+    }
+
     const lastUserMsg = messages.filter((m) => m.role === "user").slice(-3).map((m) => m.content).join(" ");
     const lore = selectRelevantLore(lastUserMsg);
 
@@ -155,8 +178,6 @@ export async function POST(req: Request) {
     }
 
     const systemPrompt = `${DM_CORE}\n\n${lore}${ctxStr}`;
-
-    // Limita histórico a 12 últimas msgs (em vez de 30)
     const truncated = messages.slice(-12);
 
     const providers = pickProviders();
@@ -167,8 +188,7 @@ export async function POST(req: Request) {
       );
     }
 
-    let lastError: string | null = null;
-    let providerUsed: string | null = null;
+    const errors: string[] = [];
 
     for (const cfg of providers) {
       try {
@@ -176,16 +196,19 @@ export async function POST(req: Request) {
         if (cfg.name === "anthropic") {
           text = await callAnthropic(cfg, systemPrompt, truncated);
         } else {
-          // OpenAI / Groq usam mesmo formato
           const fullMessages: Msg[] = [
             { role: "system", content: systemPrompt },
             ...truncated,
           ];
           text = await callOpenAI(cfg, fullMessages);
         }
-        providerUsed = cfg.name;
 
-        // Extrai diretivas
+        // Se text veio vazio (modelo só fez reasoning), tenta próximo
+        if (!text || text.trim().length < 10) {
+          errors.push(`${cfg.name}/${cfg.model}: resposta vazia`);
+          continue;
+        }
+
         const rollMatch = text.match(/\[ROLL:\s*([^\]]+)\]/i);
         const combateInicia = /\[COMBATE INICIA\]/i.test(text);
         const musicMatch = text.match(/\[MUSICA:\s*([^\]]+)\]/i);
@@ -197,23 +220,23 @@ export async function POST(req: Request) {
             combat_start: combateInicia,
             music_mood: musicMatch ? musicMatch[1].trim() : null,
           },
-          provider: providerUsed,
+          provider: cfg.name,
           model: cfg.model,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        lastError = msg;
-        // Continua pro próximo provider
+        errors.push(`${cfg.name}/${cfg.model}: ${msg.slice(0, 100)}`);
         continue;
       }
     }
 
     return NextResponse.json(
-      { error: `Todos os provedores falharam. Último: ${lastError}` },
+      { error: "Todos os provedores falharam", details: errors },
       { status: 502 }
     );
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Unknown error";
+    // GARANTE que o response sempre é JSON válido, nunca texto solto
     return NextResponse.json({ error: msg }, { status: 500 });
   }
 }

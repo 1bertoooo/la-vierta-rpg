@@ -377,8 +377,22 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           },
         }),
       });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || "Mestre fora");
+      // Captura resposta como texto antes de parsear — pra não dar JSON parse error
+      const raw = await r.text();
+      let data: { error?: string; details?: string[]; text?: string; directives?: { roll?: string; music_mood?: string } } = {};
+      try {
+        data = raw ? JSON.parse(raw) : {};
+      } catch {
+        // Resposta veio como HTML/texto — provavelmente timeout ou crash da Vercel
+        throw new Error(`resposta inválida do servidor (${r.status}): ${raw.slice(0, 100)}`);
+      }
+      if (!r.ok) {
+        const detail = data.details ? ` — ${data.details.join(" | ")}` : "";
+        throw new Error((data.error || "Mestre fora") + detail);
+      }
+      if (!data.text) {
+        throw new Error("Mestre não respondeu (texto vazio)");
+      }
 
       const textLimpo = (data.text as string)
         .replace(/\[ROLL:[^\]]+\]/gi, "")
@@ -473,8 +487,12 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   async function abrirCenaInicial() {
     if (!sessionId || aguardandoIA) return;
+    // Música começa imediatamente, mesmo se IA demorar/falhar
+    if (!audioMuted) {
+      audioPlayMood("tavern");
+      setMusicaTocando(true);
+    }
     await chamarDM(DM_OPENING_PROMPT, true);
-    // Define primeiro turno = primeiro jogador
     if (players.length > 0) {
       const sb = getSupabase();
       const primeiro = players.find((p) => p.user_id);

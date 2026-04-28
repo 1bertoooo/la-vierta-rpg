@@ -795,6 +795,24 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           }, Math.max(0, delayMs));
           break;
         }
+        case "timeskip": {
+          // Avança clocks +1 cada e marca passagem temporal
+          if (!sessionId) break;
+          setTimeout(async () => {
+            const { data: sess } = await sb.from("sessions")
+              .select("doom_clocks")
+              .eq("id", sessionId)
+              .maybeSingle();
+            const clocks = (sess as { doom_clocks?: Record<string, { max: number; current: number; label?: string }> } | null)?.doom_clocks || doomClocks;
+            const updated: typeof clocks = {};
+            for (const [k, v] of Object.entries(clocks)) {
+              updated[k] = { ...v, current: Math.min(v.max, v.current + 1) };
+            }
+            await sb.from("sessions").update({ doom_clocks: updated }).eq("id", sessionId);
+            sfxPlay("page");
+          }, Math.max(0, delayMs));
+          break;
+        }
         case "xp": {
           if (!campaign) break;
           setTimeout(async () => {
@@ -1552,6 +1570,24 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           </div>
         </div>
       )}
+
+      {/* X-card — safety panic button (John Stavropoulos). Sempre visível. */}
+      <button
+        onClick={async () => {
+          if (!confirm("Pausar a cena imediatamente? Outros jogadores recebem o aviso e o Mestre encerra a cena suavemente.")) return;
+          await logEvent({
+            actor_type: "system",
+            event_type: "safety",
+            payload: { text: `⊠ ${me?.nick || "alguém"} acionou pausa de segurança. A cena é encerrada com cuidado.` },
+          });
+          ttsStop();
+          if (!audioMuted) audioStop();
+        }}
+        title="X-card — pausa imediata da cena (segurança)"
+        className="fixed bottom-3 left-3 z-30 w-8 h-8 rounded-full bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/40 hover:border-[var(--color-sangue)] text-[var(--color-pergaminho-velho)] hover:text-[var(--color-sangue)] text-xs flex items-center justify-center opacity-50 hover:opacity-100 transition shadow-lg"
+      >
+        ⊠
+      </button>
 
       {/* Toast: TUA VEZ */}
       {tuaVezToast && (
@@ -2365,9 +2401,12 @@ function Pergaminhos({
   const [novaNota, setNovaNota] = useState("");
   const [novoEscopo, setNovoEscopo] = useState<"self" | "party" | "dm">("self");
   const [novaQuest, setNovaQuest] = useState("");
+  const [autoSaveStatus, setAutoSaveStatus] = useState<"idle" | "salvando" | "salvo">("idle");
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function adicionarNota() {
     if (!novaNota.trim()) return;
+    setAutoSaveStatus("salvando");
     const sb = getSupabase();
     await sb.from("notes").insert({
       campaign_id: campaignId,
@@ -2376,7 +2415,25 @@ function Pergaminhos({
       body: novaNota.trim().slice(0, 5000),
     });
     setNovaNota("");
+    setAutoSaveStatus("salvo");
+    setTimeout(() => setAutoSaveStatus("idle"), 1500);
   }
+
+  // Auto-save da nova nota: 2s sem digitar = salva e limpa
+  useEffect(() => {
+    if (!novaNota.trim()) {
+      setAutoSaveStatus("idle");
+      return;
+    }
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(() => {
+      adicionarNota();
+    }, 2000);
+    return () => {
+      if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [novaNota]);
 
   async function deletarNota(id: string) {
     const sb = getSupabase();
@@ -2518,14 +2575,21 @@ function Pergaminhos({
                 <textarea
                   value={novaNota}
                   onChange={(e) => setNovaNota(e.target.value.slice(0, 5000))}
-                  placeholder="Escreva uma nota…"
+                  placeholder="Escreva uma nota… (auto-salva)"
                   rows={3}
                   maxLength={5000}
                   className="w-full px-3 py-2 rounded bg-[var(--color-carvao)] border border-[var(--color-pergaminho-velho)]/40 text-sm text-[var(--color-pergaminho)] resize-none"
                 />
-                <button onClick={adicionarNota} disabled={!novaNota.trim()} className="w-full px-3 py-2 rounded bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest disabled:opacity-40">
-                  Salvar nota
-                </button>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-[var(--color-pergaminho-velho)] italic">
+                    {autoSaveStatus === "salvando" && <span>salvando…</span>}
+                    {autoSaveStatus === "salvo" && <span className="text-emerald-400">✓ salvo</span>}
+                    {autoSaveStatus === "idle" && novaNota.trim() && <span>auto-salva em 2s</span>}
+                  </span>
+                  <button onClick={adicionarNota} disabled={!novaNota.trim()} className="px-3 py-1.5 rounded bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)] text-xs uppercase tracking-widest disabled:opacity-40">
+                    Salvar agora
+                  </button>
+                </div>
               </div>
             </>
           )}

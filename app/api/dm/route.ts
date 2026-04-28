@@ -195,13 +195,33 @@ export async function POST(req: Request) {
         for (const q of context.active_quests) parts.push(`- ${q}`);
       }
       if (context.known_npcs?.length) {
-        parts.push("NPCs conhecidos pelos PCs (NÃO os reapresenta como novos; usa direto):");
-        for (const n of context.known_npcs) {
-          const partsNpc = [n.name];
-          if (n.appearance) partsNpc.push(n.appearance);
-          if (n.bordao) partsNpc.push(`"${n.bordao}"`);
-          if (n.relation !== undefined && n.relation !== 0) partsNpc.push(`relação ${n.relation > 0 ? "+" : ""}${n.relation}`);
-          parts.push(`- ${partsNpc.join(" · ")}`);
+        // Detecta NPCs mencionados pelo nome nas últimas 3 mensagens — injeta CARD COMPLETO deles
+        // (anti voice drift: LLM esquece bordão exato após msg ~30)
+        const recentText = messages.slice(-3).map((m) => m.content).join(" ").toLowerCase();
+        const mentioned = context.known_npcs.filter((n) =>
+          recentText.includes(n.name.toLowerCase()) ||
+          recentText.includes(n.name.split(" ")[0].toLowerCase())
+        );
+        const others = context.known_npcs.filter((n) => !mentioned.includes(n));
+
+        if (mentioned.length > 0) {
+          parts.push("NPCs MENCIONADOS NESSA CENA (usa o bordão e maneirismo EXATOS):");
+          for (const n of mentioned) {
+            const card: string[] = [`★ ${n.name}`];
+            if (n.appearance) card.push(`  Físico: ${n.appearance}`);
+            if (n.bordao) card.push(`  Bordão: "${n.bordao}"`);
+            if (n.relation !== undefined && n.relation !== 0) card.push(`  Relação atual: ${n.relation > 0 ? "+" : ""}${n.relation}`);
+            parts.push(card.join("\n"));
+          }
+        }
+        if (others.length > 0) {
+          parts.push("Outros NPCs conhecidos (não os reapresenta como novos):");
+          for (const n of others) {
+            const partsNpc = [n.name];
+            if (n.appearance) partsNpc.push(n.appearance);
+            if (n.bordao) partsNpc.push(`"${n.bordao}"`);
+            parts.push(`- ${partsNpc.join(" · ")}`);
+          }
         }
       }
       ctxStr = "\n\n## CONTEXTO ATUAL\n" + parts.join("\n");

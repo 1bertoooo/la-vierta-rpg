@@ -40,7 +40,8 @@ export type Directive =
   | { kind: "inspiration"; target: string }
   | { kind: "xp"; target: string; amount: number }
   | { kind: "clock"; name: string; op: "set" | "delta"; value: number }
-  | { kind: "aside"; target: string; text: string };
+  | { kind: "aside"; target: string; text: string }
+  | { kind: "timeskip"; amount: string };
 
 const TAG_RE = /\[([A-Z_]+)(?:\s*:\s*|\s+)?([^\]]*)\]/gi;
 
@@ -179,6 +180,11 @@ function parseTag(tag: string, rest: string): Directive | null {
       const target = rest.slice(0, idx).trim();
       const text = rest.slice(idx + 1).trim();
       return { kind: "aside", target, text };
+    }
+
+    case "TIMESKIP": {
+      // "3 dias", "1 semana", "1 mês"
+      return rest ? { kind: "timeskip", amount: rest } : null;
     }
 
     default:

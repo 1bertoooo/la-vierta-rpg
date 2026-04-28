@@ -484,49 +484,55 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               if (isDmNarration) {
                 const playAt = ev.payload.play_at as number | undefined;
                 const created = new Date(ev.created_at).getTime();
-                // Usa server timestamp (created_at) + offset fixo, robusto a clock skew
                 const targetAt = playAt ?? created + 4000;
                 const delay = Math.max(0, targetAt - Date.now());
 
-                // TTS sincronizado — dedup por event id (evita 2x em reconexão)
+                // Função que revela o texto (chamada quando TTS começar OU pelo timeout)
+                let revealed = false;
+                const reveal = () => {
+                  if (revealed) return;
+                  revealed = true;
+                  addLog(ev);
+                  setMestreEscrevendo(false);
+                  if (rollDir) setPendingRoll({
+                    raw: `${rollDir.attr || "1d20"}${rollDir.dc ? ` DC ${rollDir.dc}` : ""}${rollDir.vantage && rollDir.vantage !== "normal" ? ` ${rollDir.vantage === "advantage" ? "vantagem" : "desvantagem"}` : ""}`,
+                    rolled: false,
+                  });
+                  if (rollDir?.vantage === "advantage") setVantageMode("advantage");
+                  else if (rollDir?.vantage === "disadvantage") setVantageMode("disadvantage");
+                };
+
+                // Música começa imediatamente (atmosfera vai à frente)
+                audioPlayFromNarration({ explicit_mood: musicDir?.mood ?? null, text: txt });
+
+                // Aplica diretivas mecânicas
+                aplicarDiretivas(directivesParsed, delay);
+
                 if (ttsIsEnabled() && !ttsSentIdsRef.current.has(ev.id)) {
                   ttsSentIdsRef.current.add(ev.id);
-                  // Limita o set pra não crescer infinito
                   if (ttsSentIdsRef.current.size > 200) {
                     const arr = Array.from(ttsSentIdsRef.current);
                     ttsSentIdsRef.current = new Set(arr.slice(-100));
                   }
-                  ttsSpeak(txt, { playAt: targetAt });
-                }
-
-                // Música pelo diretivo OU auto-detect (ambos ou nenhum funciona)
-                audioPlayFromNarration({ explicit_mood: musicDir?.mood ?? null, text: txt });
-
-                // Aplica diretivas mecânicas (HP, SFX, NPC, QUEST etc)
-                aplicarDiretivas(directivesParsed, delay);
-
-                if (delay > 200) {
+                  // Loader místico até TTS começar de verdade
                   setMestreEscrevendo(true);
                   setAguardandoIA(false);
-                  // NÃO cancela timeout anterior — cada narração tem seu próprio agendamento
-                  // (impedia bug onde 2 narrações próximas perdiam a primeira)
-                  setTimeout(() => {
-                    addLog(ev);
-                    setMestreEscrevendo(false);
-                    if (rollDir) setPendingRoll({
-                      raw: `${rollDir.attr || "1d20"}${rollDir.dc ? ` DC ${rollDir.dc}` : ""}${rollDir.vantage && rollDir.vantage !== "normal" ? ` ${rollDir.vantage === "advantage" ? "vantagem" : "desvantagem"}` : ""}`,
-                      rolled: false,
-                    });
-                    if (rollDir?.vantage === "advantage") setVantageMode("advantage");
-                    else if (rollDir?.vantage === "disadvantage") setVantageMode("disadvantage");
-                  }, delay);
-                } else {
-                  addLog(ev);
-                  setAguardandoIA(false);
-                  if (rollDir) setPendingRoll({
-                    raw: `${rollDir.attr || "1d20"}${rollDir.dc ? ` DC ${rollDir.dc}` : ""}`,
-                    rolled: false,
+                  // Texto é revelado APENAS quando audioEl.play() resolver (TTS começou)
+                  ttsSpeak(txt, {
+                    playAt: targetAt,
+                    onStart: () => reveal(),
                   });
+                  // Safety net: se TTS travar, revela em max delay+10s
+                  setTimeout(() => reveal(), delay + 10000);
+                } else if (delay > 200) {
+                  // Sem TTS — agenda reveal pelo timestamp predito
+                  setMestreEscrevendo(true);
+                  setAguardandoIA(false);
+                  setTimeout(reveal, delay);
+                } else {
+                  // Sem TTS e sem delay — revela imediato
+                  setAguardandoIA(false);
+                  reveal();
                 }
               } else {
                 addLog(ev);
@@ -1013,8 +1019,9 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       // Mas mantemos uma versão limpa pra exibir (pra evitar [TAG] aparecer pro player).
       const textComDirs = (data.text as string).trim();
 
-      // Sincronização: marca timestamp futuro de 5s pra todos os clients tocarem juntos
-      const playAt = Date.now() + 5000;
+      // Sincronização: timestamp futuro de 7s pra todos os clients tocarem juntos.
+      // Janela maior dá tempo pro TTS preload terminar antes do play_at.
+      const playAt = Date.now() + 7000;
       await logEvent({
         actor_type: "dm",
         event_type: "narration",
@@ -1297,16 +1304,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
           </span>
         </div>
         <div className="flex items-center gap-2 sm:gap-3 text-sm">
-          <button onClick={toggleTTS} title="Voz do mestre"
-            className={`text-xs uppercase tracking-widest transition ${ttsOn ? "text-[var(--color-dourado)]" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>
-            {ttsOn ? "🔊" : "🔇"}
-          </button>
-          <button onClick={toggleTtsPause} title={ttsPaused ? "Continuar narração" : "Pausar narração"}
-            className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">
-            {ttsPaused ? "▶" : "⏸"}
-          </button>
-          <button onClick={replayUltimaNarracao} title="Repetir última narração"
-            className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]">↻</button>
+          {/* Pergaminhos */}
           <button onClick={() => setShowPergaminhos(true)} title="Pergaminhos: notas, missões, NPCs"
             className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] relative">
             📜
@@ -1316,29 +1314,38 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               </span>
             )}
           </button>
+          {/* Painel de áudio unificado */}
           <div className="relative">
-            <button onClick={() => setShowAudioPanel((s) => !s)} title="Música"
-              className={`text-xs uppercase tracking-widest transition ${musicaTocando ? "text-[var(--color-dourado)] animate-pulse" : "text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"}`}>
-              {musicaTocando ? "♪" : "♫"}
+            <button
+              onClick={() => setShowAudioPanel((s) => !s)}
+              title="Áudio: música, voz, sons"
+              className={`flex items-center gap-1 px-2 py-1 rounded border transition ${
+                showAudioPanel
+                  ? "border-[var(--color-dourado)] bg-[var(--color-vinho)]/30 text-[var(--color-dourado)]"
+                  : "border-[var(--color-pergaminho-velho)]/30 text-[var(--color-pergaminho-velho)] hover:border-[var(--color-dourado)]/60 hover:text-[var(--color-dourado)]"
+              }`}
+            >
+              <span className="text-sm">{musicaTocando || ttsOn ? "🎵" : "🔇"}</span>
+              <span className="text-[10px] uppercase tracking-widest hidden sm:inline">Áudio</span>
+              {ttsPaused && <span className="text-[10px] text-[var(--color-sangue)]">⏸</span>}
             </button>
             {showAudioPanel && (
-              <div className="absolute right-0 top-full mt-2 w-64 bg-[var(--color-carvao)] border border-[var(--color-dourado)]/60 rounded-lg p-4 z-30 shadow-xl">
-                <button
-                  onClick={toggleAudio}
-                  className={`w-full px-3 py-2 rounded text-xs uppercase tracking-widest mb-3 transition ${
-                    musicaTocando
-                      ? "bg-[var(--color-vinho)]/40 border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)]"
-                      : "bg-[var(--color-vinho)] border border-[var(--color-dourado)] text-[var(--color-pergaminho)]"
-                  }`}
-                >
-                  {audioMuted ? "▶ Tocar música" : musicaTocando ? "⏸ Silenciar" : "▶ Retomar (autoplay bloqueado — clica)"}
-                </button>
-                <label className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] block mb-1">Música</label>
-                <input type="range" min="0" max="1" step="0.05" value={audioVol} onChange={(e) => setVolume(parseFloat(e.target.value))} className="w-full" />
-                <label className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)] block mb-1 mt-3">SFX</label>
-                <input type="range" min="0" max="1" step="0.05" value={sfxVol} onChange={(e) => { const v = parseFloat(e.target.value); setSfxVol(v); sfxSetVolume(v); }} className="w-full" />
-                <p className="text-[10px] text-[var(--color-pedra)] mt-3 italic">A trilha muda conforme a cena.</p>
-              </div>
+              <AudioPanel
+                ttsOn={ttsOn}
+                ttsPaused={ttsPaused}
+                audioMuted={audioMuted}
+                musicaTocando={musicaTocando}
+                audioVol={audioVol}
+                sfxVol={sfxVol}
+                currentMood={timeOfDay}
+                onToggleTts={toggleTTS}
+                onToggleTtsPause={toggleTtsPause}
+                onReplay={replayUltimaNarracao}
+                onToggleAudio={toggleAudio}
+                onSetVolume={setVolume}
+                onSetSfxVol={(v) => { setSfxVol(v); sfxSetVolume(v); }}
+                onClose={() => setShowAudioPanel(false)}
+              />
             )}
           </div>
           <Link href="/conta" className="text-[var(--color-pergaminho)] hover:text-[var(--color-dourado)]">
@@ -1869,6 +1876,132 @@ function Ficha({ char, onUsarItem, compact }: { char: Character; onUsarItem?: (i
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * AudioPanel — Controle unificado de áudio. Voz do Mestre, Música, SFX.
+ * Substitui os 4 micro-botões do header por painel claro com labels.
+ */
+function AudioPanel({
+  ttsOn, ttsPaused, audioMuted, musicaTocando, audioVol, sfxVol,
+  onToggleTts, onToggleTtsPause, onReplay, onToggleAudio, onSetVolume, onSetSfxVol, onClose,
+}: {
+  ttsOn: boolean;
+  ttsPaused: boolean;
+  audioMuted: boolean;
+  musicaTocando: boolean;
+  audioVol: number;
+  sfxVol: number;
+  currentMood?: string;
+  onToggleTts: () => void;
+  onToggleTtsPause: () => void;
+  onReplay: () => void;
+  onToggleAudio: () => void;
+  onSetVolume: (v: number) => void;
+  onSetSfxVol: (v: number) => void;
+  onClose: () => void;
+}) {
+  return (
+    <>
+      <div className="fixed inset-0 z-20" onClick={onClose} />
+      <div className="absolute right-0 top-full mt-2 w-80 max-w-[90vw] bg-[var(--color-carvao)] border border-[var(--color-dourado)]/60 rounded-lg p-4 z-30 shadow-2xl">
+        <div className="flex items-baseline justify-between mb-3 border-b border-[var(--color-pergaminho-velho)]/20 pb-2">
+          <h3 className="text-xs uppercase tracking-widest text-[var(--color-dourado)] font-[family-name:var(--font-cinzel)]">Áudio</h3>
+          <button onClick={onClose} className="text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] text-lg leading-none">×</button>
+        </div>
+
+        {/* VOZ DO MESTRE */}
+        <div className="mb-4">
+          <div className="flex items-baseline justify-between mb-2">
+            <span className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)]">🗣 Voz do Mestre</span>
+            <span className={`text-[9px] ${ttsOn ? "text-emerald-400" : "text-[var(--color-pedra)]"}`}>
+              {ttsOn ? (ttsPaused ? "pausada" : "ligada") : "muda"}
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-1">
+            <button
+              onClick={onToggleTts}
+              className={`px-2 py-1.5 rounded text-[10px] uppercase tracking-widest border transition ${
+                ttsOn
+                  ? "bg-[var(--color-dourado)]/30 border-[var(--color-dourado)] text-[var(--color-dourado-claro)]"
+                  : "border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho-velho)] hover:border-[var(--color-dourado)]/60"
+              }`}
+            >
+              {ttsOn ? "🔊 Ligada" : "🔇 Ligar"}
+            </button>
+            <button
+              onClick={onToggleTtsPause}
+              disabled={!ttsOn}
+              className="px-2 py-1.5 rounded text-[10px] uppercase tracking-widest border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho-velho)] hover:border-[var(--color-dourado)]/60 hover:text-[var(--color-dourado)] disabled:opacity-30"
+              title={ttsPaused ? "Continuar" : "Pausar"}
+            >
+              {ttsPaused ? "▶ Continuar" : "⏸ Pausar"}
+            </button>
+            <button
+              onClick={onReplay}
+              disabled={!ttsOn}
+              className="px-2 py-1.5 rounded text-[10px] uppercase tracking-widest border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho-velho)] hover:border-[var(--color-dourado)]/60 hover:text-[var(--color-dourado)] disabled:opacity-30"
+              title="Repetir última narração"
+            >
+              ↻ Repetir
+            </button>
+          </div>
+        </div>
+
+        {/* MÚSICA AMBIENTE */}
+        <div className="mb-4">
+          <div className="flex items-baseline justify-between mb-2">
+            <span className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)]">🎵 Música ambiente</span>
+            <span className={`text-[9px] ${musicaTocando ? "text-emerald-400" : "text-[var(--color-pedra)]"}`}>
+              {audioMuted ? "muda" : musicaTocando ? "tocando" : "parada"}
+            </span>
+          </div>
+          <button
+            onClick={onToggleAudio}
+            className={`w-full px-3 py-2 rounded text-[10px] uppercase tracking-widest border mb-2 transition ${
+              !audioMuted && musicaTocando
+                ? "bg-[var(--color-dourado)]/20 border-[var(--color-dourado)] text-[var(--color-dourado-claro)]"
+                : "border-[var(--color-vinho)] bg-[var(--color-vinho)]/40 text-[var(--color-pergaminho)] hover:bg-[var(--color-vinho)]/60"
+            }`}
+          >
+            {audioMuted ? "▶ Tocar trilha" : musicaTocando ? "⏸ Silenciar" : "▶ Retomar"}
+          </button>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-[var(--color-pergaminho-velho)] w-8">vol</span>
+            <input
+              type="range" min="0" max="1" step="0.05"
+              value={audioVol}
+              onChange={(e) => onSetVolume(parseFloat(e.target.value))}
+              className="flex-1 accent-[var(--color-dourado)]"
+            />
+            <span className="text-[9px] text-[var(--color-pergaminho-velho)] w-6 text-right">{Math.round(audioVol * 100)}</span>
+          </div>
+        </div>
+
+        {/* SFX */}
+        <div className="mb-3">
+          <div className="flex items-baseline justify-between mb-2">
+            <span className="text-[10px] uppercase tracking-widest text-[var(--color-pergaminho-velho)]">🔔 Efeitos sonoros</span>
+            <span className="text-[9px] text-[var(--color-pedra)]">dados, hits, sinos</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[9px] text-[var(--color-pergaminho-velho)] w-8">vol</span>
+            <input
+              type="range" min="0" max="1" step="0.05"
+              value={sfxVol}
+              onChange={(e) => onSetSfxVol(parseFloat(e.target.value))}
+              className="flex-1 accent-[var(--color-dourado)]"
+            />
+            <span className="text-[9px] text-[var(--color-pergaminho-velho)] w-6 text-right">{Math.round(sfxVol * 100)}</span>
+          </div>
+        </div>
+
+        <p className="text-[9px] text-[var(--color-pedra)] italic text-center pt-2 border-t border-[var(--color-pergaminho-velho)]/20">
+          Sincronizado entre todos os jogadores · trilha muda com a cena
+        </p>
+      </div>
+    </>
   );
 }
 

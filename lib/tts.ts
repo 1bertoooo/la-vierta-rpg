@@ -187,11 +187,14 @@ async function fetchAudio(text: string, voice: OpenAIVoice, speed: number): Prom
 // Guard contra recursão infinita em caso de falha em loop (B13)
 let consecutiveErrors = 0;
 
+// Callback chamado quando o PRIMEIRO chunk começa a tocar de verdade
+// (audioEl.play() resolveu). Usado pra sincronizar reveal do texto com áudio.
+let onFirstPlay: (() => void) | null = null;
+
 async function tocarChunkAtual() {
   if (stopped) return;
   if (speakingChunkIdx >= chunks.length) return;
   if (consecutiveErrors > 5) {
-    // Aborta — algo tá quebrado em loop
     consecutiveErrors = 0;
     return;
   }
@@ -221,11 +224,24 @@ async function tocarChunkAtual() {
     };
     await audioEl.play();
     consecutiveErrors = 0;
+    // Primeira execução — dispara callback de sincronização de texto
+    if (speakingChunkIdx === 0 && onFirstPlay) {
+      const cb = onFirstPlay;
+      onFirstPlay = null;
+      cb();
+    }
   } catch {
     if (typeof window !== "undefined" && window.speechSynthesis) {
       const u = new SpeechSynthesisUtterance(chunk.text);
       u.lang = "pt-BR";
       u.rate = chunk.speed;
+      u.onstart = () => {
+        if (speakingChunkIdx === 0 && onFirstPlay) {
+          const cb = onFirstPlay;
+          onFirstPlay = null;
+          cb();
+        }
+      };
       u.onend = () => { speakingChunkIdx++; tocarChunkAtual(); };
       u.onerror = () => { consecutiveErrors++; speakingChunkIdx++; tocarChunkAtual(); };
       window.speechSynthesis.speak(u);
@@ -265,7 +281,10 @@ function pruneCache() {
   }
 }
 
-export function ttsSpeak(text: string, opts?: { force?: boolean; playAt?: number }) {
+export function ttsSpeak(
+  text: string,
+  opts?: { force?: boolean; playAt?: number; onStart?: () => void }
+) {
   if (typeof window === "undefined") return;
   if (!text.trim()) return;
 
@@ -275,9 +294,12 @@ export function ttsSpeak(text: string, opts?: { force?: boolean; playAt?: number
   stopped = false;
   chunks = dividirEmChunks(text);
   speakingChunkIdx = 0;
+  onFirstPlay = opts?.onStart || null;
 
   if (opts?.playAt) {
     preloadChunks(text).then(() => {
+      // Espera no MIN(playAt, agora) — se preload demorou mais que playAt,
+      // toca imediato (texto vai aguardar via onStart).
       const remaining = Math.max(0, opts.playAt! - Date.now());
       setTimeout(() => {
         if (!stopped) tocarChunkAtual();

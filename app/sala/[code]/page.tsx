@@ -484,6 +484,52 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     };
   }, [me?.id, campaign?.id]);
 
+  // Sprint S R7 — auto-add token quando novo player entra no meio do combate.
+  // Roda só no admin pra evitar 4 clients fazendo o mesmo INSERT.
+  useEffect(() => {
+    if (!isAdmin || !sessionId || !combatMap || !combatMap.tokens) return;
+    const tokenUserIds = new Set(
+      combatMap.tokens.filter((t) => t.type === "player" && t.user_id).map((t) => t.user_id)
+    );
+    const newPlayers = players.filter((p) => p.user_id && !tokenUserIds.has(p.user_id));
+    if (newPlayers.length === 0) return;
+    (async () => {
+      const sb = getSupabase();
+      // Busca characters dos novos pra preencher portrait/hp
+      const newUserIds = newPlayers.map((p) => p.user_id!);
+      const { data: chs } = await sb.from("characters")
+        .select("user_id, name, hp_current, hp_max, portrait_url")
+        .in("user_id", newUserIds);
+      const charMap = new Map<string, { name: string; hp_current?: number; hp_max?: number; portrait_url?: string }>();
+      for (const c of chs || []) charMap.set((c as { user_id: string }).user_id, c as never);
+      // Encontra slot livre no canto inferior-esquerdo (1, height-2) e seguintes
+      const occupied = new Set(combatMap.tokens.map((t) => `${t.x},${t.y}`));
+      const novosTokens: MapToken[] = [];
+      let slotIdx = 0;
+      for (const p of newPlayers) {
+        const ch = charMap.get(p.user_id!);
+        // Cantos livres tentando linha de baixo
+        let tx = 0, ty = combatMap.height - 2;
+        while (occupied.has(`${tx},${ty}`)) { tx += 1; if (tx >= combatMap.width) { tx = 0; ty -= 1; } }
+        occupied.add(`${tx},${ty}`);
+        novosTokens.push({
+          id: `pl-${p.user_id}`,
+          type: "player",
+          user_id: p.user_id,
+          name: ch?.name || p.display_name,
+          nick: p.display_name,
+          portrait_url: ch?.portrait_url || undefined,
+          x: tx, y: ty,
+          hp_current: ch?.hp_current,
+          hp_max: ch?.hp_max,
+        });
+        slotIdx++;
+      }
+      const novoMap = { ...combatMap, tokens: [...combatMap.tokens, ...novosTokens] };
+      try { await sb.from("sessions").update({ combat_map: novoMap }).eq("id", sessionId); } catch {}
+    })();
+  }, [players, combatMap, isAdmin, sessionId]);
+
   // Esc fecha modais abertos
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -710,6 +756,15 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
         if (sId) {
           const ch2 = sb.channel(`log-${sId}`).on(
+            // Sprint S R1 — DELETE handler: quando admin reseta campanha ou apaga eventos,
+            // todos os clients precisam limpar o log local. Antes, só INSERT era escutado
+            // e o log ficava zumbi mesmo após reset.
+            "postgres_changes", { event: "DELETE", schema: "public", table: "combat_log", filter: `session_id=eq.${sId}` },
+            (payload) => {
+              const oldId = (payload.old as { id?: string })?.id;
+              if (oldId) setLog((prev) => prev.filter((e) => e.id !== oldId));
+            }
+          ).on(
             "postgres_changes", { event: "INSERT", schema: "public", table: "combat_log", filter: `session_id=eq.${sId}` },
             (payload) => {
               const ev = payload.new as LogEvent;
@@ -1394,7 +1449,30 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       if (asideRows.length > 0) {
         try { await sb.from("private_asides").insert(asideRows); } catch {}
       }
-      const textComDirs = textRaw.replace(asideRe, (_, target) => `[ASIDE_PRIVATE @${target.toLowerCase()}]`);
+      // Sprint S R8 — placeholder anônimo (não vaza qual player recebeu o aside).
+      // Antes: [ASIDE_PRIVATE @bebeto] — outros viam bebeto recebeu segredo.
+      // Agora: [ASIDE_PRIVATE *] — só "alguém recebeu", o target lê via private_asides RLS.
+      const textComDirs = textRaw.replace(asideRe, () => `[ASIDE_PRIVATE *]`);
+
+      // Sprint S R4 — idempotency check: se outro admin já narrou essa rodada,
+      // dropa esta narration. Previne dupla-narração quando 2+ admins racing no flushRound.
+      // (TOCTOU possível mas raro; acompanhar via metric se ocorrer)
+      if (!isOpening && roundNumber > 0 && sessionId) {
+        try {
+          const { data: existing } = await sb
+            .from("combat_log")
+            .select("id")
+            .eq("session_id", sessionId)
+            .eq("actor_type", "dm")
+            .eq("event_type", "narration")
+            .filter("payload->>round", "eq", String(roundNumber))
+            .limit(1);
+          if (existing && existing.length > 0) {
+            // Outro client já narrou — skip
+            return;
+          }
+        } catch {}
+      }
 
       // Sincronização: timestamp futuro de 7s pra todos os clients tocarem juntos.
       // Janela maior dá tempo pro TTS preload terminar antes do play_at.
@@ -1416,11 +1494,16 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       const rollDir = dirs.find((d): d is Extract<Directive, { kind: "roll" }> => d.kind === "roll");
       const pediuAttack = dirs.some((d) => d.kind === "attack");
       const pediuInit = dirs.some((d) => d.kind === "initiative");
-      const pediuRoll = !!rollDir || pediuAttack || pediuInit;
+      // Sprint S R3 — só conta como "pediu roll" se o target é ativo. Caso contrário,
+      // a directive vira ruído e a rodada deve fechar normalmente (não trava em narrating).
+      const validNicksSet = new Set(jogadoresAtivos.map((p) => p.display_name.toLowerCase()));
+      const rollTargetValid = !rollDir || !rollDir.target || validNicksSet.has(rollDir.target.toLowerCase());
+      const pediuRoll = (!!rollDir && rollTargetValid) || pediuAttack || pediuInit;
 
       // Sprint B/D — sincroniza pending_roll server-side (todos os clients sabem que tá rolando).
       // Quem ganhou o lock_dm é responsável por essa transição (não exige isAdmin — Bug 1).
-      if (rollDir && rollDir.target && sessionId) {
+      // Sprint S R3 — só seta se o target é nick ATIVO (rollTargetValid já calculado acima).
+      if (rollDir && rollDir.target && sessionId && rollTargetValid) {
         try {
           await sb.rpc("set_pending_roll", {
             p_session_id: sessionId,
@@ -1430,6 +1513,12 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
             p_vantage: rollDir.vantage || "normal",
           });
         } catch {}
+      } else if (rollDir && rollDir.target && !rollTargetValid) {
+        await logEvent({
+          actor_type: "system",
+          event_type: "info",
+          payload: { text: `Mestre pediu rolagem de @${rollDir.target} mas esse jogador não está ativo — rolagem descartada.` },
+        });
       }
 
       // Em combate (turn-based linear), avança turno se não pediu roll
@@ -1589,7 +1678,12 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   async function enviarAcaoTexto(txt: string) {
     if (!txt || !sessionId || !me?.id) return;
     if (aguardandoIA || mestreEscrevendo) return;
-    if (pendingRoll && !pendingRoll.rolled) return; // rolagem pendente bloqueia ação
+    // Sprint S R6 — pendingRoll só bloqueia o player que é o target da rolagem.
+    // Os outros podem continuar agindo enquanto careca rola.
+    if (pendingRoll && !pendingRoll.rolled) {
+      const targetNick = pendingRoll.target?.toLowerCase();
+      if (targetNick && targetNick === (me.nick || "").toLowerCase()) return;
+    }
     if (jaAgiNestaRodada) return;
 
     // Em combate, mantemos turn-based linear (current_turn_player_id) — bypass buffer.
@@ -1850,8 +1944,10 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     : false;
 
   // Sprint B — buffer de rodadas
-  // "Jogadores ativos" = quem tem user_id setado E foi visto nos últimos 5 min
-  const cincoMinAtras = Date.now() - 5 * 60 * 1000;
+  // Sprint S R5 — "ativo" = visto nos últimos 90s (alinhado com auto-skip AFK).
+  // Antes era 5min, mas isso fazia 3 jogadores esperarem 5min por um que fechou
+  // o browser. 90s é o mesmo limiar do auto-skip e dá feedback rápido.
+  const cincoMinAtras = Date.now() - 90 * 1000;
   const jogadoresAtivos = players.filter((p) => p.user_id && new Date(p.last_seen_at).getTime() > cincoMinAtras);
   const jaAgiNestaRodada = !!me?.id && pendingActions.some((a) => a.player_id === me.id);
   const aguardandoOutros = roundPhase === "collecting" && jaAgiNestaRodada;
@@ -2027,13 +2123,19 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               <button
                 onClick={async () => {
                   if (!sessionId) return;
-                  // Reseta state-machine e dispara DM com último contexto
+                  // Sprint S R12 — limpa estado preso, libera locks E seta phase=narrating
+                  // ANTES do call pra os outros 3 verem "Mestre tecendo a cena" via realtime.
                   try {
                     const sb = getSupabase();
-                    await sb.rpc("force_complete_round", { p_session_id: sessionId });
                     await sb.rpc("release_dm_lock", { p_session_id: sessionId });
+                    // Limpa pending_actions sem fechar a rodada (vamos narrar agora)
+                    await sb.from("sessions").update({
+                      pending_actions: [],
+                      pending_roll: null,
+                      round_phase: "narrating",
+                      dm_locked_until: null,
+                    }).eq("id", sessionId);
                   } catch {}
-                  // Força aguardandoIA = false caso esteja preso
                   setAguardandoIA(false);
                   // Chama o Mestre direto com prompt de continuidade (force ignora aguardandoIA preso e lock)
                   await chamarDM(

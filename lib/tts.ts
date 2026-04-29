@@ -69,6 +69,7 @@ let chunks: { text: string; voice: OpenAIVoice; speed: number }[] = [];
 let stopped = false;
 
 const TTS_KEY = "lavierta:tts:enabled";
+const TTS_VOL_KEY = "lavierta:tts:volume"; // Sprint U #4 — volume da narração separado da música
 const audioCache: Map<string, string> = new Map();
 
 export function ttsIsEnabled(): boolean {
@@ -83,6 +84,42 @@ export function ttsSetEnabled(v: boolean) {
   if (typeof window === "undefined") return;
   localStorage.setItem(TTS_KEY, v ? "true" : "false");
   if (!v) ttsStop();
+}
+
+// Sprint U #3 — unlock de áudio em mobile (iOS Safari precisa de gesture).
+// Chama silently na primeira interação do usuário pra liberar o policy de autoplay.
+// Sem isso, a narração só começa a tocar depois que o user toca em algo, mas em
+// celular esse "tocar" precisa rodar play() de um audio element pra valer.
+let unlocked = false;
+export function ttsUnlock() {
+  if (unlocked || typeof window === "undefined") return;
+  try {
+    const a = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA");
+    a.volume = 0;
+    const p = a.play();
+    if (p && typeof p.then === "function") {
+      p.then(() => { unlocked = true; a.pause(); }).catch(() => {});
+    } else {
+      unlocked = true;
+    }
+  } catch {}
+}
+
+// Sprint U #4 — volume da narração (default 1.0, audível alto por padrão)
+export function ttsGetVolume(): number {
+  if (typeof window === "undefined") return 1.0;
+  const v = localStorage.getItem(TTS_VOL_KEY);
+  if (v === null) return 1.0;
+  const parsed = parseFloat(v);
+  if (isNaN(parsed)) return 1.0;
+  return Math.max(0, Math.min(1, parsed));
+}
+
+export function ttsSetVolume(v: number) {
+  if (typeof window === "undefined") return;
+  const clamped = Math.max(0, Math.min(1, v));
+  localStorage.setItem(TTS_VOL_KEY, String(clamped));
+  if (audioEl) audioEl.volume = clamped;
 }
 
 export function ttsStop() {
@@ -212,6 +249,7 @@ async function tocarChunkAtual() {
     const url = await fetchAudio(chunk.text, chunk.voice, chunk.speed);
     if (stopped) return;
     audioEl = new Audio(url);
+    audioEl.volume = ttsGetVolume(); // Sprint U #4 — aplica volume configurado
     audioEl.onended = () => {
       consecutiveErrors = 0;
       speakingChunkIdx++;

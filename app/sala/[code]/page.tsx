@@ -2073,7 +2073,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
               const lastSeen = p.last_seen_at ? new Date(p.last_seen_at).getTime() : 0;
               const online = Date.now() - lastSeen < 60000;
               return (
-                <li key={p.id}>
+                <li key={p.id} className="relative group">
                   <button
                     onClick={() => p.user_id && ch && setFichaVendo(p.user_id)}
                     disabled={!ch}
@@ -2108,6 +2108,56 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                     </div>
                     {ch && <div className="text-[10px] text-[var(--color-sangue)]">{ch.hp_current}/{ch.hp_max}</div>}
                   </button>
+                  {/* Sprint T — admin pode excluir jogador da sala (não a si mesmo) */}
+                  {isAdmin && !isMe && (
+                    <button
+                      type="button"
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        const nome = ch?.name || p.display_name;
+                        const apagarFicha = confirm(
+                          `Remover ${nome} da sala?\n\nOK = remove player + apaga ficha.\nCancelar = mantém na sala.`
+                        );
+                        if (!apagarFicha) return;
+                        try {
+                          const sb = getSupabase();
+                          if (p.user_id && campaign?.id) {
+                            // Apaga ficha (se houver)
+                            await sb.from("characters")
+                              .delete()
+                              .eq("user_id", p.user_id)
+                              .eq("campaign_id", campaign.id);
+                          }
+                          // Apaga player record
+                          await sb.from("players").delete().eq("id", p.id);
+                          // Remove token do mapa de combate (se houver)
+                          if (sessionId && combatMap && p.user_id) {
+                            const novosTokens = combatMap.tokens.filter(
+                              (t) => !(t.type === "player" && t.user_id === p.user_id)
+                            );
+                            if (novosTokens.length !== combatMap.tokens.length) {
+                              await sb.from("sessions")
+                                .update({ combat_map: { ...combatMap, tokens: novosTokens } })
+                                .eq("id", sessionId);
+                            }
+                          }
+                          // Se em rodada coletando e player tinha agido, recalcula buffer
+                          // (ação dele fica zumbi mas total ativo agora é menor — admin pode forçar)
+                          await logEvent({
+                            actor_type: "system",
+                            event_type: "info",
+                            payload: { text: `Admin removeu ${nome} da sala.` },
+                          });
+                        } catch (err) {
+                          alert("Erro ao remover: " + (err instanceof Error ? err.message : "desconhecido"));
+                        }
+                      }}
+                      title={`Remover ${ch?.name || p.display_name} da sala`}
+                      className="absolute top-0.5 right-0.5 opacity-0 group-hover:opacity-100 transition w-5 h-5 flex items-center justify-center text-[var(--color-sangue)] hover:text-[var(--color-pergaminho)] hover:bg-[var(--color-sangue)]/30 rounded-full text-xs leading-none"
+                    >
+                      ×
+                    </button>
+                  )}
                 </li>
               );
             })}

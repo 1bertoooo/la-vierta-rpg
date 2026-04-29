@@ -6,7 +6,7 @@ import Link from "next/link";
 import { getSupabase, type Profile } from "@/lib/supabase/client";
 import { setLastRoomCode } from "@/lib/player";
 import { rolarDados, DADOS_PADRAO } from "@/lib/dados";
-import { ttsSpeak, ttsStop, ttsIsEnabled, ttsSetEnabled, ttsPause, ttsResume, ttsIsPaused } from "@/lib/tts";
+import { ttsSpeak, ttsStop, ttsIsEnabled, ttsSetEnabled, ttsPause, ttsResume, ttsIsPaused, ttsGetVolume, ttsSetVolume, ttsUnlock } from "@/lib/tts";
 import { CLASSES, RACAS, modAtributo } from "@/lib/lvs";
 import { DM_OPENING_PROMPT } from "@/lib/dm-prompt";
 import {
@@ -234,6 +234,8 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   const [mestreEscrevendo, setMestreEscrevendo] = useState(false);
   // Volume SFX (separado da música)
   const [sfxVol, setSfxVol] = useState(0.45);
+  // Sprint U #4 — Volume da narração separado (default 1.0 = 100%)
+  const [ttsVol, setTtsVol] = useState(1.0);
   // Toast de "tua vez"
   const [tuaVezToast, setTuaVezToast] = useState(false);
   // Vantagem/desvantagem da próxima rolagem
@@ -423,6 +425,15 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     // Carrega volume salvo (real) e converte pra UI
     setAudioVol(realToUiVolume(audioGetVolume()));
     setSfxVol(sfxGetVolume());
+    setTtsVol(ttsGetVolume());
+    // Sprint U #3 — desbloqueia áudio em mobile na primeira interação (iOS Safari)
+    const unlockOnce = () => {
+      ttsUnlock();
+      window.removeEventListener("touchstart", unlockOnce);
+      window.removeEventListener("click", unlockOnce);
+    };
+    window.addEventListener("touchstart", unlockOnce, { once: true });
+    window.addEventListener("click", unlockOnce, { once: true });
     // Sprint O — onboarding no primeiro acesso
     try {
       if (!localStorage.getItem("la-vierta-onboarded")) {
@@ -1494,25 +1505,41 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
       const rollDir = dirs.find((d): d is Extract<Directive, { kind: "roll" }> => d.kind === "roll");
       const pediuAttack = dirs.some((d) => d.kind === "attack");
       const pediuInit = dirs.some((d) => d.kind === "initiative");
-      // Sprint S R3 — só conta como "pediu roll" se o target é ativo. Caso contrário,
-      // a directive vira ruído e a rodada deve fechar normalmente (não trava em narrating).
-      const validNicksSet = new Set(jogadoresAtivos.map((p) => p.display_name.toLowerCase()));
+      // Sprint S R3 + Sprint U #6 — valida target contra login nick OU primeiro nome
+      // do personagem. DM_CORE pede pra usar primeiro nome do personagem; se ficha
+      // não existe, login nick é o fallback. Aceita ambos pra ser robusto.
+      const validNicksSet = new Set<string>();
+      for (const p of jogadoresAtivos) {
+        validNicksSet.add(p.display_name.toLowerCase());
+        const ch = characters[p.user_id || ""];
+        if (ch?.name) {
+          const firstName = ch.name.split(" ")[0].toLowerCase();
+          validNicksSet.add(firstName);
+        }
+      }
       const rollTargetValid = !rollDir || !rollDir.target || validNicksSet.has(rollDir.target.toLowerCase());
       const pediuRoll = (!!rollDir && rollTargetValid) || pediuAttack || pediuInit;
 
       // Sprint B/D — sincroniza pending_roll server-side (todos os clients sabem que tá rolando).
       // Quem ganhou o lock_dm é responsável por essa transição (não exige isAdmin — Bug 1).
       // Sprint S R3 — só seta se o target é nick ATIVO (rollTargetValid já calculado acima).
+      // Sprint U #2 — atrasa o set_pending_roll pelo mesmo offset da narração (playAt).
+      // Antes: pending_roll aparecia ANTES do texto da narração ser revelado, gerando
+      // "aguardando rolagem de X" sem contexto. Agora sincroniza com a aparição da fala.
       if (rollDir && rollDir.target && sessionId && rollTargetValid) {
-        try {
-          await sb.rpc("set_pending_roll", {
-            p_session_id: sessionId,
-            p_target_nick: rollDir.target,
-            p_attr: rollDir.attr || null,
-            p_dc: rollDir.dc || null,
-            p_vantage: rollDir.vantage || "normal",
-          });
-        } catch {}
+        const setRollAfterNarration = async () => {
+          try {
+            await sb.rpc("set_pending_roll", {
+              p_session_id: sessionId,
+              p_target_nick: rollDir.target,
+              p_attr: rollDir.attr || null,
+              p_dc: rollDir.dc || null,
+              p_vantage: rollDir.vantage || "normal",
+            });
+          } catch {}
+        };
+        const delayMs = Math.max(0, playAt - Date.now());
+        setTimeout(setRollAfterNarration, delayMs);
       } else if (rollDir && rollDir.target && !rollTargetValid) {
         await logEvent({
           actor_type: "system",
@@ -1678,11 +1705,16 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
   async function enviarAcaoTexto(txt: string) {
     if (!txt || !sessionId || !me?.id) return;
     if (aguardandoIA || mestreEscrevendo) return;
-    // Sprint S R6 — pendingRoll só bloqueia o player que é o target da rolagem.
-    // Os outros podem continuar agindo enquanto careca rola.
+    // Sprint S R6 + Sprint U #6 — pendingRoll só bloqueia o target. Aceita login nick
+    // OU primeiro nome do personagem (DM agora prefere usar o nome do personagem).
     if (pendingRoll && !pendingRoll.rolled) {
-      const targetNick = pendingRoll.target?.toLowerCase();
-      if (targetNick && targetNick === (me.nick || "").toLowerCase()) return;
+      const targetLower = pendingRoll.target?.toLowerCase();
+      if (targetLower) {
+        const myNickLower = (me.nick || "").toLowerCase();
+        const myCh = characters[me.id];
+        const myCharFirstName = myCh?.name?.split(" ")[0].toLowerCase() || "";
+        if (targetLower === myNickLower || targetLower === myCharFirstName) return;
+      }
     }
     if (jaAgiNestaRodada) return;
 
@@ -1776,13 +1808,21 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
     if (lastNarratedRoundRef.current === round) return;
     lastNarratedRoundRef.current = round;
 
-    // Bug 8 — valida targets de roll (Mestre alucina @nick inválido).
-    // Cruza nicks ativos para ajudar o LLM a NÃO alucinar.
-    const nicksAtivos = jogadoresAtivos.map((p) => p.display_name).join(", ");
+    // Bug 8 + Sprint U #6 — valida targets de roll (Mestre alucina @nick inválido).
+    // Lista nomes ATIVOS preferindo primeiro nome do personagem (mais imersivo no prompt).
+    const nicksAtivos = jogadoresAtivos.map((p) => {
+      const ch = characters[p.user_id || ""];
+      return ch?.name?.split(" ")[0] || p.display_name;
+    }).join(", ");
 
-    // Monta prompt agregado
-    const linhas = acoes.map((a) => `@${a.nick}: ${a.text}`).join("\n");
-    const prompt = `[Rodada ${round} — Ações do grupo]\n${linhas}\n\nNarre o resultado costurando TODAS as ações conjuntamente. Cada jogador ganha pelo menos 1 frase de spotlight. Se for pedir rolagem, use [ROLL: ATR DC X @nick] com @nick específico — só vale @ entre os nicks ativos: ${nicksAtivos}.`;
+    // Monta prompt agregado — usa primeiro nome do personagem quando há ficha
+    const linhas = acoes.map((a) => {
+      const player = jogadoresAtivos.find((p) => p.id === a.player_id || p.display_name === a.nick);
+      const ch = player ? characters[player.user_id || ""] : null;
+      const nome = ch?.name?.split(" ")[0] || a.nick;
+      return `@${nome}: ${a.text}`;
+    }).join("\n");
+    const prompt = `[Rodada ${round} — Ações do grupo]\n${linhas}\n\nNarre o resultado costurando TODAS as ações conjuntamente. Cada jogador ganha pelo menos 1 frase de spotlight. Se for pedir rolagem, use [ROLL: ATR DC X @TAG] com TAG = primeiro nome do personagem (preferido) ou login nick. Só vale TAG entre estes ATIVOS: ${nicksAtivos}.`;
 
     // Chama DM (silent: prompt agregado não vai pro log como speak)
     // Após resposta, chamarDM() decide:
@@ -1936,10 +1976,14 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 
   // Roll com alvo: se Mestre marcou @nick, só esse player vê o botão.
   // Sem target (raro — INITIATIVE coletiva) qualquer player pode rolar (cai no ehMeuTurno legacy).
+  // Sprint U #6 — aceita login nick OU primeiro nome do personagem como alvo válido.
   const meuNickLower = (me?.nick || "").toLowerCase();
+  const meuChar = me?.id ? characters[me.id] : null;
+  const meuCharFirstName = meuChar?.name?.split(" ")[0].toLowerCase() || "";
   const ehMeuRoll = pendingRoll
     ? (pendingRoll.target
-        ? pendingRoll.target.toLowerCase() === meuNickLower
+        ? (pendingRoll.target.toLowerCase() === meuNickLower
+           || pendingRoll.target.toLowerCase() === meuCharFirstName)
         : ehMeuTurno) // fallback: sem target, regra antiga
     : false;
 
@@ -2032,6 +2076,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 musicaTocando={musicaTocando}
                 audioVol={audioVol}
                 sfxVol={sfxVol}
+                ttsVol={ttsVol}
                 currentMood={timeOfDay}
                 onToggleTts={toggleTTS}
                 onToggleTtsPause={toggleTtsPause}
@@ -2039,6 +2084,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
                 onToggleAudio={toggleAudio}
                 onSetVolume={setVolume}
                 onSetSfxVol={(v) => { setSfxVol(v); sfxSetVolume(v); }}
+                onSetTtsVol={(v) => { setTtsVol(v); ttsSetVolume(v); }}
                 onClose={() => setShowAudioPanel(false)}
               />
             )}
@@ -2705,18 +2751,7 @@ export default function SalaPage({ params }: { params: Promise<{ code: string }>
 }
 
 function LogEntry({ ev, myUserId, onReplay }: { ev: LogEvent; myUserId: string | undefined; onReplay: (text: string) => void }) {
-  // Sprint M — emoji reactions locais (localStorage por event id)
-  const [reactions, setReactions] = useState<string[]>(() => {
-    if (typeof window === "undefined") return [];
-    try { return JSON.parse(localStorage.getItem(`la-vierta-reactions-${ev.id}`) || "[]"); } catch { return []; }
-  });
-  const toggleReaction = (e: string) => {
-    setReactions((cur) => {
-      const next = cur.includes(e) ? cur.filter((x) => x !== e) : [...cur, e];
-      try { localStorage.setItem(`la-vierta-reactions-${ev.id}`, JSON.stringify(next)); } catch {}
-      return next;
-    });
-  };
+  // Sprint U — emoji reactions removidos (poluíam visual)
 
   if (ev.actor_type === "dm") {
     const textRaw = (ev.payload.text as string) || "";
@@ -2729,40 +2764,25 @@ function LogEntry({ ev, myUserId, onReplay }: { ev: LogEvent; myUserId: string |
           <p className="text-xs uppercase tracking-widest text-[var(--color-dourado)]">Mestre</p>
           {provider && <span className="text-[9px] text-[var(--color-pedra)] uppercase">✦ {provider}</span>}
           <button onClick={() => onReplay(text)} className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] opacity-0 group-hover:opacity-100 transition" title="Ouvir de novo">↻</button>
-          {/* Sprint M — Share narração + emoji reactions */}
-          <div className="ml-auto flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
-            {["⚜","🔥","😱","💀","❤️"].map((e) => (
-              <button key={e} onClick={() => toggleReaction(e)}
-                className={`text-xs hover:scale-110 transition ${reactions.includes(e) ? "" : "grayscale opacity-50"}`}
-                title={`Reagir ${e}`}>
-                {e}
-              </button>
-            ))}
-            <button
-              onClick={() => {
-                const blob = new Blob([
-                  `La Vierta — Mestre\n\n${text}\n\n— ${new Date(ev.created_at).toLocaleString("pt-BR")}`,
-                ], { type: "text/plain" });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url;
-                a.download = `la-vierta-${ev.id.slice(0,8)}.txt`;
-                a.click();
-                setTimeout(() => URL.revokeObjectURL(url), 1000);
-              }}
-              className="text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)]"
-              title="Salvar narração"
-            >
-              💾
-            </button>
-          </div>
+          <button
+            onClick={() => {
+              const blob = new Blob([
+                `La Vierta — Mestre\n\n${text}\n\n— ${new Date(ev.created_at).toLocaleString("pt-BR")}`,
+              ], { type: "text/plain" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `la-vierta-${ev.id.slice(0,8)}.txt`;
+              a.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }}
+            className="ml-auto text-xs text-[var(--color-pergaminho-velho)] hover:text-[var(--color-dourado)] opacity-0 group-hover:opacity-100 transition"
+            title="Salvar narração"
+          >
+            💾
+          </button>
         </div>
         <p className="text-[var(--color-pergaminho)] leading-relaxed whitespace-pre-wrap">{text}</p>
-        {reactions.length > 0 && (
-          <div className="mt-1 flex gap-1">
-            {reactions.map((e) => <span key={e} className="text-sm">{e}</span>)}
-          </div>
-        )}
       </div>
     );
   }
@@ -3118,8 +3138,8 @@ function MicAcao({
  * Substitui os 4 micro-botões do header por painel claro com labels.
  */
 function AudioPanel({
-  ttsOn, ttsPaused, audioMuted, musicaTocando, audioVol, sfxVol,
-  onToggleTts, onToggleTtsPause, onReplay, onToggleAudio, onSetVolume, onSetSfxVol, onClose,
+  ttsOn, ttsPaused, audioMuted, musicaTocando, audioVol, sfxVol, ttsVol,
+  onToggleTts, onToggleTtsPause, onReplay, onToggleAudio, onSetVolume, onSetSfxVol, onSetTtsVol, onClose,
 }: {
   ttsOn: boolean;
   ttsPaused: boolean;
@@ -3127,6 +3147,7 @@ function AudioPanel({
   musicaTocando: boolean;
   audioVol: number;
   sfxVol: number;
+  ttsVol: number;
   currentMood?: string;
   onToggleTts: () => void;
   onToggleTtsPause: () => void;
@@ -3134,6 +3155,7 @@ function AudioPanel({
   onToggleAudio: () => void;
   onSetVolume: (v: number) => void;
   onSetSfxVol: (v: number) => void;
+  onSetTtsVol: (v: number) => void;
   onClose: () => void;
 }) {
   return (
@@ -3180,6 +3202,18 @@ function AudioPanel({
             >
               ↻ Repetir
             </button>
+          </div>
+          {/* Sprint U #4 — slider de volume da narração separado */}
+          <div className="mt-2 flex items-center gap-2">
+            <span className="text-[9px] text-[var(--color-pergaminho-velho)] uppercase tracking-widest w-12">Volume</span>
+            <input
+              type="range" min={0} max={1} step={0.05}
+              value={ttsVol}
+              onChange={(e) => onSetTtsVol(parseFloat(e.target.value))}
+              disabled={!ttsOn}
+              className="flex-1 accent-[var(--color-dourado)] disabled:opacity-30"
+            />
+            <span className="text-[9px] text-[var(--color-dourado)] w-8 text-right">{Math.round(ttsVol * 100)}%</span>
           </div>
         </div>
 
@@ -4531,17 +4565,19 @@ function RestButtons({ char }: { char: Character }) {
       <button
         onClick={shortRest}
         disabled={char.hp_current <= 0 || (char.hit_dice_current ?? char.level) <= 0}
-        className="px-3 py-2 rounded border border-[var(--color-pergaminho-velho)]/40 text-xs uppercase tracking-widest text-[var(--color-pergaminho)] hover:border-[var(--color-dourado)] disabled:opacity-40"
-        title="Descanso curto: gasta 1 hit die, recupera 1d8+CON HP"
+        className="px-3 py-2 rounded border border-[var(--color-pergaminho-velho)]/40 text-[var(--color-pergaminho)] hover:border-[var(--color-dourado)] disabled:opacity-40 flex flex-col items-center gap-0"
+        title="Gasta 1 dado de vida e recupera HP — pra um respiro entre cenas"
       >
-        ☾ Curto
+        <span className="text-xs uppercase tracking-widest">☾ Descanso Curto</span>
+        <span className="text-[9px] text-[var(--color-pergaminho-velho)] normal-case tracking-normal">recupera HP</span>
       </button>
       <button
         onClick={longRest}
-        className="px-3 py-2 rounded border border-[var(--color-dourado)]/60 text-xs uppercase tracking-widest text-[var(--color-dourado)] hover:bg-[var(--color-dourado)]/20"
-        title="Descanso longo: HP cheio, slots resetam, recupera 1/2 nível em hit dice"
+        className="px-3 py-2 rounded border border-[var(--color-dourado)]/60 text-[var(--color-dourado)] hover:bg-[var(--color-dourado)]/20 flex flex-col items-center gap-0"
+        title="Noite inteira de sono — HP cheio + magias resetam"
       >
-        ☽ Longo
+        <span className="text-xs uppercase tracking-widest">☽ Descanso Longo</span>
+        <span className="text-[9px] text-[var(--color-dourado)]/70 normal-case tracking-normal">HP cheio + magias</span>
       </button>
     </div>
   );
